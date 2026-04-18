@@ -54,6 +54,7 @@ from .mimetic import (
 )
 from .observability import InMemoryMetrics
 from .policy import PolicyContext, PolicyDecision, PolicyEngine
+from .queue_runtime import ActionJob, InMemoryActionQueue, JobStatus, WorkerLease
 from .session_lifecycle import (
     InMemoryCheckpointStore,
     InvalidSessionTransitionError,
@@ -95,6 +96,8 @@ __all__ = [
     "InMemoryMetrics",
     "InMemoryCheckpointStore",
     "InvalidSessionTransitionError",
+    "InMemoryActionQueue",
+    "JobStatus",
     "ProjectMimicEnv",
     "ProxyEndpoint",
     "PolicyContext",
@@ -120,9 +123,11 @@ __all__ = [
     "TaskEvidence",
     "TypoCorrectionStrategy",
     "UIAction",
+    "ActionJob",
     "VerifyStepRequest",
     "VerifyStepResponse",
     "VisionServiceHandler",
+    "WorkerLease",
     "build_default_grpc_runtime",
     "calculate_risk_score",
     "grade_task",

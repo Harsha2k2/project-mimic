@@ -68,11 +68,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 09: Queue and Worker Orchestration
 
-41. [ ] Add task queue abstraction for action job dispatch.
-42. [ ] Add worker lease model with heartbeat renewal.
-43. [ ] Add dead-letter queue handling and replay command.
-44. [ ] Add idempotency key checks on all worker tasks.
-45. [ ] Add end-to-end tests for queue recovery scenarios.
+41. [x] Add task queue abstraction for action job dispatch.
+42. [x] Add worker lease model with heartbeat renewal.
+43. [x] Add dead-letter queue handling and replay command.
+44. [x] Add idempotency key checks on all worker tasks.
+45. [x] Add end-to-end tests for queue recovery scenarios.
 
 ## Feature 10: Identity and Proxy Management
 
