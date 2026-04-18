@@ -9,8 +9,10 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from .engine import ExecutionEngine
 from .environment import ProjectMimicEnv
 from .models import Observation, Reward, UIAction
+from .vision.grounding import BBox, DOMNode, UIEntity
 
 
 class CreateSessionRequest(BaseModel):
@@ -32,6 +34,46 @@ class StepResponse(BaseModel):
     reward: Reward
     done: bool
     info: dict[str, Any]
+
+
+class BBoxPayload(BaseModel):
+    x: int
+    y: int
+    width: int
+    height: int
+
+
+class UIEntityPayload(BaseModel):
+    entity_id: str
+    label: str
+    role: str
+    text: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    bbox: BBoxPayload
+
+
+class DOMNodePayload(BaseModel):
+    dom_node_id: str
+    role: str
+    text: str
+    visible: bool
+    enabled: bool
+    z_index: int
+    bbox: BBoxPayload
+
+
+class DecideRequest(BaseModel):
+    entities: list[UIEntityPayload]
+    dom_nodes: list[DOMNodePayload]
+
+
+class DecideResponse(BaseModel):
+    status: str
+    state: str
+    dom_node_id: str | None = None
+    x: int | None = None
+    y: int | None = None
+    score: float | None = None
 
 
 class SessionRegistry:
@@ -59,6 +101,7 @@ class SessionRegistry:
 def create_app() -> FastAPI:
     app = FastAPI(title="Project Mimic API", version="0.1.0")
     registry = SessionRegistry()
+    engine = ExecutionEngine()
 
     @app.post("/sessions", response_model=SessionCreatedResponse)
     def create_session(payload: CreateSessionRequest) -> SessionCreatedResponse:
@@ -96,6 +139,53 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="session not found") from exc
 
         return env.state()
+
+    @app.post("/decision/click", response_model=DecideResponse)
+    def decide_click(payload: DecideRequest) -> DecideResponse:
+        entities = [
+            UIEntity(
+                entity_id=item.entity_id,
+                label=item.label,
+                role=item.role,
+                text=item.text,
+                confidence=item.confidence,
+                bbox=BBox(
+                    x=item.bbox.x,
+                    y=item.bbox.y,
+                    width=item.bbox.width,
+                    height=item.bbox.height,
+                ),
+            )
+            for item in payload.entities
+        ]
+
+        dom_nodes = [
+            DOMNode(
+                dom_node_id=item.dom_node_id,
+                role=item.role,
+                text=item.text,
+                visible=item.visible,
+                enabled=item.enabled,
+                z_index=item.z_index,
+                bbox=BBox(
+                    x=item.bbox.x,
+                    y=item.bbox.y,
+                    width=item.bbox.width,
+                    height=item.bbox.height,
+                ),
+            )
+            for item in payload.dom_nodes
+        ]
+
+        decision = engine.decide_coordinate_click(entities=entities, dom_nodes=dom_nodes)
+        return DecideResponse(
+            status=decision.status,
+            state=decision.state.value,
+            dom_node_id=decision.dom_node_id,
+            x=decision.x,
+            y=decision.y,
+            score=decision.score,
+        )
 
     return app
 

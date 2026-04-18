@@ -48,3 +48,72 @@ def test_reset_endpoint_allows_goal_override() -> None:
     reset_response = client.post(f"/sessions/{session_id}/reset", json={"goal": "updated goal"})
     assert reset_response.status_code == 200
     assert reset_response.json()["goal"] == "updated goal"
+
+
+def test_decision_click_returns_best_target() -> None:
+    client = TestClient(create_app())
+    response = client.post(
+        "/decision/click",
+        json={
+            "entities": [
+                {
+                    "entity_id": "e1",
+                    "label": "Search",
+                    "role": "button",
+                    "text": "Search Flights",
+                    "confidence": 0.9,
+                    "bbox": {"x": 100, "y": 100, "width": 120, "height": 40},
+                }
+            ],
+            "dom_nodes": [
+                {
+                    "dom_node_id": "search-btn",
+                    "role": "button",
+                    "text": "Search Flights",
+                    "visible": True,
+                    "enabled": True,
+                    "z_index": 10,
+                    "bbox": {"x": 102, "y": 101, "width": 120, "height": 40},
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "ok"
+    assert payload["dom_node_id"] == "search-btn"
+
+
+def test_decision_click_returns_no_target_for_non_interactable_dom() -> None:
+    client = TestClient(create_app())
+    response = client.post(
+        "/decision/click",
+        json={
+            "entities": [
+                {
+                    "entity_id": "e1",
+                    "label": "Search",
+                    "role": "button",
+                    "text": "Search",
+                    "confidence": 0.9,
+                    "bbox": {"x": 100, "y": 100, "width": 80, "height": 30},
+                }
+            ],
+            "dom_nodes": [
+                {
+                    "dom_node_id": "search-btn",
+                    "role": "button",
+                    "text": "Search",
+                    "visible": False,
+                    "enabled": True,
+                    "z_index": 1,
+                    "bbox": {"x": 100, "y": 100, "width": 80, "height": 30},
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "no_target"
