@@ -15,7 +15,7 @@ Execution rule for this backlog:
 3. [x] Add organization and tenant model with strict data isolation.
 4. [x] Add per-tenant rate limits and request quotas.
 5. [x] Add API key lifecycle management (create, rotate, revoke, scope).
-6. [ ] Add immutable audit logs for all control-plane mutations.
+6. [x] Add immutable audit logs for all control-plane mutations.
 7. [ ] Add audit export pipeline to SIEM destinations.
 8. [ ] Add persistent metadata store for session records.
 9. [ ] Add durable queue backend for worker jobs.

@@ -217,6 +217,23 @@ class APIKeyRevokeResponse(APIPayloadModel):
     revoked: bool
 
 
+class AuditLogEntry(APIPayloadModel):
+    event_id: str
+    timestamp: float
+    request_id: str | None = None
+    tenant_id: str
+    api_key_id: str | None = None
+    action: str
+    resource_type: str
+    resource_id: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuditLogListResponse(APIPayloadModel):
+    items: list[AuditLogEntry]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -242,6 +259,7 @@ def create_app() -> FastAPI:
     daily_quota = int(os.getenv("API_DAILY_QUOTA", "0"))
     tenant_minute_counters: dict[tuple[str, int], int] = {}
     tenant_daily_counters: dict[tuple[str, int], int] = {}
+    audit_events: list[dict[str, Any]] = []
 
     role_map: dict[str, str] = {}
     for pair in os.getenv("API_AUTH_ROLE_MAP", "").split(","):
@@ -345,12 +363,52 @@ def create_app() -> FastAPI:
     def _required_role_for_request(method: str, path: str) -> str:
         if path.startswith(f"{API_V1_PREFIX}/auth/keys") or path.startswith("/auth/keys"):
             return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/audit/logs") or path.startswith("/audit/logs"):
+            return "admin"
         if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
             return "operator"
         return "viewer"
 
     def _tenant_id(request: Request) -> str:
         return str(getattr(request.state, "tenant_id", default_tenant))
+
+    def _append_audit_event(
+        request: Request,
+        *,
+        action: str,
+        resource_type: str,
+        resource_id: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        audit_events.append(
+            {
+                "event_id": str(uuid4()),
+                "timestamp": time.time(),
+                "request_id": getattr(request.state, "request_id", None),
+                "tenant_id": _tenant_id(request),
+                "api_key_id": getattr(request.state, "api_key_id", None),
+                "action": action,
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "details": details or {},
+            }
+        )
+
+    def _list_audit_events(
+        *,
+        action: str | None,
+        tenant_id: str | None,
+        limit: int,
+    ) -> AuditLogListResponse:
+        filtered = audit_events
+        if action:
+            filtered = [item for item in filtered if item["action"] == action]
+        if tenant_id:
+            filtered = [item for item in filtered if item["tenant_id"] == tenant_id]
+
+        selected = list(reversed(filtered))[:limit]
+        items = [AuditLogEntry(**item) for item in selected]
+        return AuditLogListResponse(items=items, total=len(filtered))
 
     def _reject_limit(
         request: Request,
@@ -810,6 +868,13 @@ def create_app() -> FastAPI:
     @app.post(f"{API_V1_PREFIX}/sessions", response_model=SessionCreatedResponse)
     def create_session_v1(payload: CreateSessionRequest, request: Request) -> SessionCreatedResponse:
         response = _create_session(payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.create",
+            resource_type="session",
+            resource_id=response.session_id,
+            details={"goal": payload.goal},
+        )
         metrics.record_feature_result(
             "session.create",
             success=True,
@@ -827,6 +892,13 @@ def create_app() -> FastAPI:
     ) -> SessionCreatedResponse:
         _set_deprecation_headers(response)
         created = _create_session(payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.create",
+            resource_type="session",
+            resource_id=created.session_id,
+            details={"goal": payload.goal},
+        )
         metrics.record_feature_result(
             "session.create",
             success=True,
@@ -838,7 +910,15 @@ def create_app() -> FastAPI:
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/reset", response_model=Observation)
     def reset_session_v1(session_id: str, payload: ResetSessionRequest, request: Request) -> Observation:
-        return _reset_session(session_id, payload, tenant_id=_tenant_id(request))
+        observation = _reset_session(session_id, payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.reset",
+            resource_type="session",
+            resource_id=session_id,
+            details={"goal": payload.goal},
+        )
+        return observation
 
     @app.post("/sessions/{session_id}/reset", response_model=Observation, deprecated=True)
     def reset_session_legacy(
@@ -848,11 +928,26 @@ def create_app() -> FastAPI:
         request: Request,
     ) -> Observation:
         _set_deprecation_headers(response)
-        return _reset_session(session_id, payload, tenant_id=_tenant_id(request))
+        observation = _reset_session(session_id, payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.reset",
+            resource_type="session",
+            resource_id=session_id,
+            details={"goal": payload.goal},
+        )
+        return observation
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/step", response_model=StepResponse)
     def step_session_v1(session_id: str, action: UIAction, request: Request) -> StepResponse:
         response = _step_session(session_id, action, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.step",
+            resource_type="session",
+            resource_id=session_id,
+            details={"action_type": action.action_type.value},
+        )
         goal = response.observation.goal
         metrics.record_feature_result(
             "session.step",
@@ -872,6 +967,13 @@ def create_app() -> FastAPI:
     ) -> StepResponse:
         _set_deprecation_headers(response)
         step_response = _step_session(session_id, action, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.step",
+            resource_type="session",
+            resource_id=session_id,
+            details={"action_type": action.action_type.value},
+        )
         metrics.record_feature_result(
             "session.step",
             success=True,
@@ -951,21 +1053,67 @@ def create_app() -> FastAPI:
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/rollback")
     def rollback_session_v1(session_id: str, request: Request) -> dict[str, Any]:
-        return _rollback_session(session_id, tenant_id=_tenant_id(request))
+        payload = _rollback_session(session_id, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.rollback",
+            resource_type="session",
+            resource_id=session_id,
+        )
+        return payload
 
     @app.post("/sessions/{session_id}/rollback", deprecated=True)
     def rollback_session_legacy(session_id: str, response: Response, request: Request) -> dict[str, Any]:
         _set_deprecation_headers(response)
-        return _rollback_session(session_id, tenant_id=_tenant_id(request))
+        payload = _rollback_session(session_id, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.rollback",
+            resource_type="session",
+            resource_id=session_id,
+        )
+        return payload
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/resume")
     def resume_session_v1(session_id: str, request: Request) -> dict[str, Any]:
-        return _resume_session(session_id, tenant_id=_tenant_id(request))
+        payload = _resume_session(session_id, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.resume",
+            resource_type="session",
+            resource_id=session_id,
+        )
+        return payload
 
     @app.post("/sessions/{session_id}/resume", deprecated=True)
     def resume_session_legacy(session_id: str, response: Response, request: Request) -> dict[str, Any]:
         _set_deprecation_headers(response)
-        return _resume_session(session_id, tenant_id=_tenant_id(request))
+        payload = _resume_session(session_id, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="session.resume",
+            resource_type="session",
+            resource_id=session_id,
+        )
+        return payload
+
+    @app.get(f"{API_V1_PREFIX}/audit/logs", response_model=AuditLogListResponse)
+    def list_audit_logs_v1(
+        action: str | None = Query(default=None),
+        tenant_id: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> AuditLogListResponse:
+        return _list_audit_events(action=action, tenant_id=tenant_id, limit=limit)
+
+    @app.get("/audit/logs", response_model=AuditLogListResponse, deprecated=True)
+    def list_audit_logs_legacy(
+        response: Response,
+        action: str | None = Query(default=None),
+        tenant_id: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=1000),
+    ) -> AuditLogListResponse:
+        _set_deprecation_headers(response)
+        return _list_audit_events(action=action, tenant_id=tenant_id, limit=limit)
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
@@ -977,31 +1125,79 @@ def create_app() -> FastAPI:
         return _list_api_keys()
 
     @app.post(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyCreateResponse)
-    def create_api_key_v1(payload: APIKeyCreateRequest) -> APIKeyCreateResponse:
-        return _create_api_key(payload)
+    def create_api_key_v1(payload: APIKeyCreateRequest, request: Request) -> APIKeyCreateResponse:
+        created = _create_api_key(payload)
+        _append_audit_event(
+            request,
+            action="auth.key.create",
+            resource_type="api_key",
+            resource_id=created.key_id,
+            details={"role": created.role, "tenant_id": created.tenant_id},
+        )
+        return created
 
     @app.post("/auth/keys", response_model=APIKeyCreateResponse, deprecated=True)
-    def create_api_key_legacy(payload: APIKeyCreateRequest, response: Response) -> APIKeyCreateResponse:
+    def create_api_key_legacy(
+        payload: APIKeyCreateRequest,
+        response: Response,
+        request: Request,
+    ) -> APIKeyCreateResponse:
         _set_deprecation_headers(response)
-        return _create_api_key(payload)
+        created = _create_api_key(payload)
+        _append_audit_event(
+            request,
+            action="auth.key.create",
+            resource_type="api_key",
+            resource_id=created.key_id,
+            details={"role": created.role, "tenant_id": created.tenant_id},
+        )
+        return created
 
     @app.post(f"{API_V1_PREFIX}/auth/keys/{{key_id}}/rotate", response_model=APIKeyRotateResponse)
-    def rotate_api_key_v1(key_id: str) -> APIKeyRotateResponse:
-        return _rotate_api_key(key_id)
+    def rotate_api_key_v1(key_id: str, request: Request) -> APIKeyRotateResponse:
+        rotated = _rotate_api_key(key_id)
+        _append_audit_event(
+            request,
+            action="auth.key.rotate",
+            resource_type="api_key",
+            resource_id=key_id,
+        )
+        return rotated
 
     @app.post("/auth/keys/{key_id}/rotate", response_model=APIKeyRotateResponse, deprecated=True)
-    def rotate_api_key_legacy(key_id: str, response: Response) -> APIKeyRotateResponse:
+    def rotate_api_key_legacy(key_id: str, response: Response, request: Request) -> APIKeyRotateResponse:
         _set_deprecation_headers(response)
-        return _rotate_api_key(key_id)
+        rotated = _rotate_api_key(key_id)
+        _append_audit_event(
+            request,
+            action="auth.key.rotate",
+            resource_type="api_key",
+            resource_id=key_id,
+        )
+        return rotated
 
     @app.post(f"{API_V1_PREFIX}/auth/keys/{{key_id}}/revoke", response_model=APIKeyRevokeResponse)
-    def revoke_api_key_v1(key_id: str) -> APIKeyRevokeResponse:
-        return _revoke_api_key(key_id)
+    def revoke_api_key_v1(key_id: str, request: Request) -> APIKeyRevokeResponse:
+        revoked = _revoke_api_key(key_id)
+        _append_audit_event(
+            request,
+            action="auth.key.revoke",
+            resource_type="api_key",
+            resource_id=key_id,
+        )
+        return revoked
 
     @app.post("/auth/keys/{key_id}/revoke", response_model=APIKeyRevokeResponse, deprecated=True)
-    def revoke_api_key_legacy(key_id: str, response: Response) -> APIKeyRevokeResponse:
+    def revoke_api_key_legacy(key_id: str, response: Response, request: Request) -> APIKeyRevokeResponse:
         _set_deprecation_headers(response)
-        return _revoke_api_key(key_id)
+        revoked = _revoke_api_key(key_id)
+        _append_audit_event(
+            request,
+            action="auth.key.revoke",
+            resource_type="api_key",
+            resource_id=key_id,
+        )
+        return revoked
 
     @app.post(
         f"{API_V1_PREFIX}/decision/click",

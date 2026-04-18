@@ -26,6 +26,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/10-tenant-isolation-foundation.md`
   - `lld/11-tenant-rate-limit-and-quota.md`
   - `lld/12-api-key-lifecycle-management.md`
+  - `lld/13-immutable-audit-logs.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

@@ -434,3 +434,30 @@ def test_api_key_lifecycle_create_rotate_revoke(monkeypatch) -> None:
         json={"goal": "revoked", "max_steps": 2},
     )
     assert revoked_denied.status_code == 401
+
+
+def test_audit_logs_capture_mutations_and_require_admin(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "admin-key,operator-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "admin-key:admin,operator-key:operator")
+    monkeypatch.setenv("API_AUTH_TENANT_MAP", "admin-key:tenant-admin,operator-key:tenant-op")
+    client = TestClient(create_app())
+
+    created = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": "operator-key"},
+        json={"goal": "audit", "max_steps": 2},
+    )
+    assert created.status_code == 200
+
+    admin_logs = client.get(
+        "/api/v1/audit/logs?action=session.create",
+        headers={"X-API-Key": "admin-key"},
+    )
+    assert admin_logs.status_code == 200
+    payload = admin_logs.json()
+    assert payload["total"] >= 1
+    assert any(item["action"] == "session.create" for item in payload["items"])
+
+    denied_logs = client.get("/api/v1/audit/logs", headers={"X-API-Key": "operator-key"})
+    assert denied_logs.status_code == 403
+    assert denied_logs.json()["error"]["code"] == "FORBIDDEN"
