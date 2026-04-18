@@ -243,3 +243,37 @@ def test_api_auth_does_not_block_openapi(monkeypatch) -> None:
 
     response = client.get("/openapi.json")
     assert response.status_code == 200
+
+
+def test_api_rbac_blocks_viewer_from_mutating_routes(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "viewer-key,operator-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "viewer-key:viewer,operator-key:operator")
+    client = TestClient(create_app())
+
+    blocked = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": "viewer-key"},
+        json={"goal": "rbac", "max_steps": 2},
+    )
+    assert blocked.status_code == 403
+    assert blocked.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_api_rbac_allows_viewer_read_only_routes(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "viewer-key,operator-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "viewer-key:viewer,operator-key:operator")
+    client = TestClient(create_app())
+
+    created = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": "operator-key"},
+        json={"goal": "rbac", "max_steps": 2},
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    allowed = client.get(
+        f"/api/v1/sessions/{session_id}/state",
+        headers={"X-API-Key": "viewer-key"},
+    )
+    assert allowed.status_code == 200

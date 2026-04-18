@@ -22,6 +22,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/06-orchestrator-internals.md`
   - `lld/07-vision-internals.md`
   - `lld/08-api-authentication-foundation.md`
+  - `lld/09-api-authorization-rbac.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

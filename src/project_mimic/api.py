@@ -149,6 +149,7 @@ class APIErrorCode(str, Enum):
     VALIDATION_ERROR = "VALIDATION_ERROR"
     REQUEST_VALIDATION_ERROR = "REQUEST_VALIDATION_ERROR"
     UNAUTHORIZED = "UNAUTHORIZED"
+    FORBIDDEN = "FORBIDDEN"
     SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
     SESSION_EXPIRED = "SESSION_EXPIRED"
     SESSION_CONFLICT = "SESSION_CONFLICT"
@@ -185,6 +186,21 @@ def create_app() -> FastAPI:
     session_ttl_seconds = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
     scavenger_interval_seconds = int(os.getenv("SESSION_SCAVENGER_INTERVAL_SECONDS", "5"))
     auth_keys = {item.strip() for item in os.getenv("API_AUTH_KEYS", "").split(",") if item.strip()}
+    role_rank = {"viewer": 1, "operator": 2, "admin": 3}
+    default_role = os.getenv("API_AUTH_DEFAULT_ROLE", "operator").strip().lower()
+    if default_role not in role_rank:
+        default_role = "operator"
+
+    role_map: dict[str, str] = {}
+    for pair in os.getenv("API_AUTH_ROLE_MAP", "").split(","):
+        cleaned = pair.strip()
+        if not cleaned or ":" not in cleaned:
+            continue
+        key, role = cleaned.split(":", 1)
+        key = key.strip()
+        role = role.strip().lower()
+        if key and role in role_rank:
+            role_map[key] = role
 
     registry = SessionRegistry(ttl_seconds=session_ttl_seconds)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -203,6 +219,11 @@ def create_app() -> FastAPI:
         if path in {"/openapi.json", "/docs/oauth2-redirect"}:
             return True
         return path.startswith("/docs") or path == "/redoc"
+
+    def _required_role_for_method(method: str) -> str:
+        if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
+            return "operator"
+        return "viewer"
 
     def _error_response(
         request: Request,
@@ -389,6 +410,19 @@ def create_app() -> FastAPI:
                 unauthorized_response.headers["X-Request-ID"] = request_id
                 unauthorized_response.headers["X-Correlation-ID"] = request_id
                 return unauthorized_response
+
+            caller_role = role_map.get(provided_key, default_role)
+            required_role = _required_role_for_method(request.method)
+            if role_rank[caller_role] < role_rank[required_role]:
+                forbidden_response = _error_response(
+                    request,
+                    status_code=403,
+                    code=APIErrorCode.FORBIDDEN,
+                    message="role does not permit this operation",
+                )
+                forbidden_response.headers["X-Request-ID"] = request_id
+                forbidden_response.headers["X-Correlation-ID"] = request_id
+                return forbidden_response
 
         start = time.perf_counter()
         with api_tracer.start_span(

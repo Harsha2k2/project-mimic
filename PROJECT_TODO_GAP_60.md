@@ -11,7 +11,7 @@ Execution rule for this backlog:
 ## Needed + Missed (P0)
 
 1. [x] Add real API authentication for all endpoints (API keys or JWT).
-2. [ ] Add authorization layer with role-based permissions.
+2. [x] Add authorization layer with role-based permissions.
 3. [ ] Add organization and tenant model with strict data isolation.
 4. [ ] Add per-tenant rate limits and request quotas.
 5. [ ] Add API key lifecycle management (create, rotate, revoke, scope).
