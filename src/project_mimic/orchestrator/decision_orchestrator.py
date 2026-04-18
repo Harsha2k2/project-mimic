@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 
+from ..observability import OpenTelemetryTracer
 from .retry_budget import RetryBudgetManager
 from .state_machine import ActionState, ActionStateMachine, StepSignal
 from .strategy import OrchestrationStrategy, SiteStrategyRegistry
@@ -53,11 +54,16 @@ class ConfidenceCalibrator:
 class DecisionOrchestrator:
     """Selects best grounded action and executes deterministic step lifecycle."""
 
-    def __init__(self, config: OrchestratorConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: OrchestratorConfig | None = None,
+        tracer: OpenTelemetryTracer | None = None,
+    ) -> None:
         self.config = config or OrchestratorConfig()
         self.state_machine = ActionStateMachine(max_retries=self.config.max_retries)
         self.calibrator = ConfidenceCalibrator()
         self.replay_log: list[ReplayEvent] = []
+        self.tracer = tracer or OpenTelemetryTracer(component="orchestrator")
         self.strategy_registry = SiteStrategyRegistry(default_strategy=OrchestrationStrategy())
         self.retry_budget = RetryBudgetManager(
             per_state_caps={
@@ -76,67 +82,79 @@ class DecisionOrchestrator:
         signal_quality: float | None = None,
     ) -> ActionCandidate | None:
         quality = signal_quality if signal_quality is not None else self.config.default_signal_quality
-        strategy = self.strategy_registry.resolve(site_id)
-        calibrated: list[ActionCandidate] = []
+        with self.tracer.start_span(
+            "orchestrator.select_candidate",
+            attributes={
+                "site_id": site_id or "unknown",
+                "candidate_count": len(candidates),
+                "signal_quality": quality,
+            },
+        ):
+            strategy = self.strategy_registry.resolve(site_id)
+            calibrated: list[ActionCandidate] = []
 
-        for candidate in candidates:
-            strategy_confidence = strategy.calibrate_confidence(candidate, quality)
-            confidence = self.calibrator.calibrate(
-                raw_confidence=strategy_confidence,
-                signal_quality=quality,
-                history_success=candidate.history_success,
-            )
-            calibrated.append(
-                ActionCandidate(
-                    intent=candidate.intent,
-                    dom_node_id=candidate.dom_node_id,
-                    x=candidate.x,
-                    y=candidate.y,
-                    confidence=confidence,
+            for candidate in candidates:
+                strategy_confidence = strategy.calibrate_confidence(candidate, quality)
+                confidence = self.calibrator.calibrate(
+                    raw_confidence=strategy_confidence,
+                    signal_quality=quality,
                     history_success=candidate.history_success,
                 )
-            )
-
-        viable = [c for c in calibrated if c.confidence >= self.config.min_confidence]
-        if not viable:
-            return self._select_fallback(calibrated, strategy)
-
-        selected = max(
-            viable,
-            key=lambda c: c.score(history_weight=self.config.history_weight),
-        )
-        self._record_event(
-            "select_candidate",
-            {
-                "site_id": site_id,
-                "selected_dom_node_id": selected.dom_node_id,
-                "confidence": selected.confidence,
-            },
-        )
-        return selected
-
-    def run_cycle(self, signals: list[StepSignal]) -> ActionState:
-        for signal in signals:
-            if not self.retry_budget.consume(self.state_machine.state):
-                self._record_event(
-                    "retry_budget_exhausted",
-                    {"state": self.state_machine.state.value},
+                calibrated.append(
+                    ActionCandidate(
+                        intent=candidate.intent,
+                        dom_node_id=candidate.dom_node_id,
+                        x=candidate.x,
+                        y=candidate.y,
+                        confidence=confidence,
+                        history_success=candidate.history_success,
+                    )
                 )
-                self.state_machine.state = ActionState.FAIL
-                return self.state_machine.state
 
-            state = self.state_machine.apply(signal)
+            viable = [c for c in calibrated if c.confidence >= self.config.min_confidence]
+            if not viable:
+                return self._select_fallback(calibrated, strategy)
+
+            selected = max(
+                viable,
+                key=lambda c: c.score(history_weight=self.config.history_weight),
+            )
             self._record_event(
-                "state_transition",
+                "select_candidate",
                 {
-                    "state": state.value,
-                    "retry_count": self.state_machine.retry_count,
+                    "site_id": site_id,
+                    "selected_dom_node_id": selected.dom_node_id,
+                    "confidence": selected.confidence,
                 },
             )
-            if self.state_machine.is_terminal():
-                return state
+            return selected
 
-        return self.state_machine.state
+    def run_cycle(self, signals: list[StepSignal]) -> ActionState:
+        with self.tracer.start_span(
+            "orchestrator.run_cycle",
+            attributes={"signal_count": len(signals)},
+        ):
+            for signal in signals:
+                if not self.retry_budget.consume(self.state_machine.state):
+                    self._record_event(
+                        "retry_budget_exhausted",
+                        {"state": self.state_machine.state.value},
+                    )
+                    self.state_machine.state = ActionState.FAIL
+                    return self.state_machine.state
+
+                state = self.state_machine.apply(signal)
+                self._record_event(
+                    "state_transition",
+                    {
+                        "state": state.value,
+                        "retry_count": self.state_machine.retry_count,
+                    },
+                )
+                if self.state_machine.is_terminal():
+                    return state
+
+            return self.state_machine.state
 
     def reset_cycle(self) -> None:
         self.state_machine.reset()

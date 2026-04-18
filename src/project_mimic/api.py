@@ -17,7 +17,8 @@ from pydantic import ConfigDict, Field
 from .error_mapping import map_exception_to_error
 from .engine import ExecutionEngine
 from .models import Observation, ProjectMimicModel, Reward, UIAction
-from .observability import InMemoryMetrics
+from .observability import InMemoryMetrics, OpenTelemetryTracer
+from .orchestrator.decision_orchestrator import DecisionOrchestrator
 from .session_lifecycle import (
     InvalidSessionTransitionError,
     SessionExpiredError,
@@ -183,7 +184,9 @@ def create_app() -> FastAPI:
     scavenger_interval_seconds = int(os.getenv("SESSION_SCAVENGER_INTERVAL_SECONDS", "5"))
 
     registry = SessionRegistry(ttl_seconds=session_ttl_seconds)
-    engine = ExecutionEngine()
+    api_tracer = OpenTelemetryTracer(component="api")
+    orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
+    engine = ExecutionEngine(orchestrator=DecisionOrchestrator(tracer=orchestrator_tracer))
     metrics = InMemoryMetrics()
     scavenger_stop = Event()
     scavenger_thread: Thread | None = None
@@ -348,7 +351,12 @@ def create_app() -> FastAPI:
         request_id = request.headers.get("x-request-id") or str(uuid4())
         request.state.request_id = request_id
         start = time.perf_counter()
-        response = await call_next(request)
+        with api_tracer.start_span(
+            "api.request",
+            trace_id=request_id,
+            attributes={"path": request.url.path, "method": request.method},
+        ):
+            response = await call_next(request)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         metrics.record(request.url.path, response.status_code, elapsed_ms)
         response.headers["X-Request-ID"] = request_id
@@ -420,13 +428,33 @@ def create_app() -> FastAPI:
         )
 
     @app.post(f"{API_V1_PREFIX}/sessions", response_model=SessionCreatedResponse)
-    def create_session_v1(payload: CreateSessionRequest) -> SessionCreatedResponse:
-        return _create_session(payload)
+    def create_session_v1(payload: CreateSessionRequest, request: Request) -> SessionCreatedResponse:
+        response = _create_session(payload)
+        metrics.record_feature_result(
+            "session.create",
+            success=True,
+            trace_id=getattr(request.state, "request_id", None),
+            goal=payload.goal,
+            action_type="create",
+        )
+        return response
 
     @app.post("/sessions", response_model=SessionCreatedResponse, deprecated=True)
-    def create_session_legacy(payload: CreateSessionRequest, response: Response) -> SessionCreatedResponse:
+    def create_session_legacy(
+        payload: CreateSessionRequest,
+        response: Response,
+        request: Request,
+    ) -> SessionCreatedResponse:
         _set_deprecation_headers(response)
-        return _create_session(payload)
+        created = _create_session(payload)
+        metrics.record_feature_result(
+            "session.create",
+            success=True,
+            trace_id=getattr(request.state, "request_id", None),
+            goal=payload.goal,
+            action_type="create",
+        )
+        return created
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/reset", response_model=Observation)
     def reset_session_v1(session_id: str, payload: ResetSessionRequest) -> Observation:
@@ -438,13 +466,35 @@ def create_app() -> FastAPI:
         return _reset_session(session_id, payload)
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/step", response_model=StepResponse)
-    def step_session_v1(session_id: str, action: UIAction) -> StepResponse:
-        return _step_session(session_id, action)
+    def step_session_v1(session_id: str, action: UIAction, request: Request) -> StepResponse:
+        response = _step_session(session_id, action)
+        goal = response.observation.goal
+        metrics.record_feature_result(
+            "session.step",
+            success=True,
+            trace_id=getattr(request.state, "request_id", None),
+            goal=goal,
+            action_type=action.action_type.value,
+        )
+        return response
 
     @app.post("/sessions/{session_id}/step", response_model=StepResponse, deprecated=True)
-    def step_session_legacy(session_id: str, action: UIAction, response: Response) -> StepResponse:
+    def step_session_legacy(
+        session_id: str,
+        action: UIAction,
+        response: Response,
+        request: Request,
+    ) -> StepResponse:
         _set_deprecation_headers(response)
-        return _step_session(session_id, action)
+        step_response = _step_session(session_id, action)
+        metrics.record_feature_result(
+            "session.step",
+            success=True,
+            trace_id=getattr(request.state, "request_id", None),
+            goal=step_response.observation.goal,
+            action_type=action.action_type.value,
+        )
+        return step_response
 
     @app.get(f"{API_V1_PREFIX}/sessions/{{session_id}}/state")
     def state_session_v1(session_id: str) -> dict[str, Any]:
@@ -533,22 +583,46 @@ def create_app() -> FastAPI:
             }
         },
     )
-    def decide_click_v1(payload: DecideRequest) -> DecideResponse:
-        return _decide_click(payload)
+    def decide_click_v1(payload: DecideRequest, request: Request) -> DecideResponse:
+        response = _decide_click(payload)
+        metrics.record_feature_result(
+            "orchestrator.decision",
+            success=response.status == "ok",
+            trace_id=getattr(request.state, "request_id", None),
+            action_type="click",
+        )
+        return response
 
     @app.post("/decision/click", response_model=DecideResponse, deprecated=True)
-    def decide_click_legacy(payload: DecideRequest, response: Response) -> DecideResponse:
+    def decide_click_legacy(payload: DecideRequest, response: Response, request: Request) -> DecideResponse:
         _set_deprecation_headers(response)
-        return _decide_click(payload)
+        decide_response = _decide_click(payload)
+        metrics.record_feature_result(
+            "orchestrator.decision",
+            success=decide_response.status == "ok",
+            trace_id=getattr(request.state, "request_id", None),
+            action_type="click",
+        )
+        return decide_response
 
     @app.get(f"{API_V1_PREFIX}/metrics")
     def get_metrics_v1() -> dict[str, Any]:
-        return metrics.snapshot()
+        snapshot = metrics.snapshot()
+        snapshot["traces"] = {
+            "api": api_tracer.trace_snapshot(),
+            "orchestrator": orchestrator_tracer.trace_snapshot(),
+        }
+        return snapshot
 
     @app.get("/metrics", deprecated=True)
     def get_metrics_legacy(response: Response) -> dict[str, Any]:
         _set_deprecation_headers(response)
-        return metrics.snapshot()
+        snapshot = metrics.snapshot()
+        snapshot["traces"] = {
+            "api": api_tracer.trace_snapshot(),
+            "orchestrator": orchestrator_tracer.trace_snapshot(),
+        }
+        return snapshot
 
     return app
 

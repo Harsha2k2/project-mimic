@@ -92,11 +92,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 12: Observability and Tracing
 
-56. [ ] Add OpenTelemetry tracing for API and orchestrator.
-57. [ ] Add p95 and p99 latency histograms per endpoint.
-58. [ ] Add per-feature success rate metrics and dashboards.
-59. [ ] Add trace correlation from goal to action emission.
-60. [ ] Add tests validating metrics endpoint field stability.
+56. [x] Add OpenTelemetry tracing for API and orchestrator.
+57. [x] Add p95 and p99 latency histograms per endpoint.
+58. [x] Add per-feature success rate metrics and dashboards.
+59. [x] Add trace correlation from goal to action emission.
+60. [x] Add tests validating metrics endpoint field stability.
 
 ## Feature 13: Reliability and Recovery
 

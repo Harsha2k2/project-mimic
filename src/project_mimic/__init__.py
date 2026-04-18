@@ -56,7 +56,7 @@ from .mimetic import (
     plan_pointer_stream,
     synthesize_typing_stream,
 )
-from .observability import InMemoryMetrics
+from .observability import InMemoryMetrics, OpenTelemetryTracer, TraceSpan
 from .policy import PolicyContext, PolicyDecision, PolicyEngine
 from .queue_runtime import ActionJob, InMemoryActionQueue, JobStatus, WorkerLease
 from .session_lifecycle import (
@@ -99,6 +99,7 @@ __all__ = [
     "NextStepRequest",
     "NextStepResponse",
     "InMemoryMetrics",
+    "OpenTelemetryTracer",
     "InMemoryCheckpointStore",
     "InvalidSessionTransitionError",
     "InMemoryActionQueue",
@@ -129,6 +130,7 @@ __all__ = [
     "TaskDefinition",
     "TaskDifficulty",
     "TaskEvidence",
+    "TraceSpan",
     "TypoCorrectionStrategy",
     "UIAction",
     "ActionJob",
