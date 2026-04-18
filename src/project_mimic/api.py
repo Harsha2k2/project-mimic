@@ -151,6 +151,8 @@ class APIErrorCode(str, Enum):
     REQUEST_VALIDATION_ERROR = "REQUEST_VALIDATION_ERROR"
     UNAUTHORIZED = "UNAUTHORIZED"
     FORBIDDEN = "FORBIDDEN"
+    RATE_LIMITED = "RATE_LIMITED"
+    QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
     SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
     SESSION_EXPIRED = "SESSION_EXPIRED"
     SESSION_CONFLICT = "SESSION_CONFLICT"
@@ -197,6 +199,10 @@ def create_app() -> FastAPI:
         "false",
         "no",
     }
+    rate_limit_per_minute = int(os.getenv("API_RATE_LIMIT_PER_MINUTE", "0"))
+    daily_quota = int(os.getenv("API_DAILY_QUOTA", "0"))
+    tenant_minute_counters: dict[tuple[str, int], int] = {}
+    tenant_daily_counters: dict[tuple[str, int], int] = {}
 
     role_map: dict[str, str] = {}
     for pair in os.getenv("API_AUTH_ROLE_MAP", "").split(","):
@@ -245,6 +251,64 @@ def create_app() -> FastAPI:
 
     def _tenant_id(request: Request) -> str:
         return str(getattr(request.state, "tenant_id", default_tenant))
+
+    def _reject_limit(
+        request: Request,
+        request_id: str,
+        *,
+        code: APIErrorCode,
+        message: str,
+        retry_after: int | None = None,
+    ) -> JSONResponse:
+        response = _error_response(
+            request,
+            status_code=429,
+            code=code,
+            message=message,
+        )
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Correlation-ID"] = request_id
+        if retry_after is not None:
+            response.headers["Retry-After"] = str(retry_after)
+        return response
+
+    def _enforce_tenant_limits(request: Request, request_id: str, tenant_id: str) -> JSONResponse | None:
+        epoch_seconds = int(time.time())
+
+        if rate_limit_per_minute > 0:
+            minute_bucket = epoch_seconds // 60
+            stale_keys = [key for key in tenant_minute_counters if key[1] < minute_bucket - 1]
+            for key in stale_keys:
+                tenant_minute_counters.pop(key, None)
+
+            minute_key = (tenant_id, minute_bucket)
+            tenant_minute_counters[minute_key] = tenant_minute_counters.get(minute_key, 0) + 1
+            if tenant_minute_counters[minute_key] > rate_limit_per_minute:
+                return _reject_limit(
+                    request,
+                    request_id,
+                    code=APIErrorCode.RATE_LIMITED,
+                    message="tenant rate limit exceeded",
+                    retry_after=60,
+                )
+
+        if daily_quota > 0:
+            day_bucket = epoch_seconds // 86400
+            stale_days = [key for key in tenant_daily_counters if key[1] < day_bucket]
+            for key in stale_days:
+                tenant_daily_counters.pop(key, None)
+
+            day_key = (tenant_id, day_bucket)
+            tenant_daily_counters[day_key] = tenant_daily_counters.get(day_key, 0) + 1
+            if tenant_daily_counters[day_key] > daily_quota:
+                return _reject_limit(
+                    request,
+                    request_id,
+                    code=APIErrorCode.QUOTA_EXCEEDED,
+                    message="tenant daily quota exceeded",
+                )
+
+        return None
 
     def _error_response(
         request: Request,
@@ -493,6 +557,11 @@ def create_app() -> FastAPI:
             request.state.tenant_id = resolved_tenant
         else:
             request.state.tenant_id = request.headers.get("x-tenant-id", "").strip() or default_tenant
+
+        if not _is_auth_exempt_path(request.url.path):
+            throttled = _enforce_tenant_limits(request, request_id, _tenant_id(request))
+            if throttled is not None:
+                return throttled
 
         start = time.perf_counter()
         with api_tracer.start_span(

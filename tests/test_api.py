@@ -325,3 +325,39 @@ def test_tenant_isolation_filters_session_listing(monkeypatch) -> None:
     items = listed.json()["items"]
     assert items
     assert all(item["tenant_id"] == "tenant-a" for item in items)
+
+
+def test_tenant_rate_limit_returns_429(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "tenant-a-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "tenant-a-key:operator")
+    monkeypatch.setenv("API_AUTH_TENANT_MAP", "tenant-a-key:tenant-a")
+    monkeypatch.setenv("API_RATE_LIMIT_PER_MINUTE", "2")
+    monkeypatch.setenv("API_DAILY_QUOTA", "0")
+    client = TestClient(create_app())
+
+    first = client.get("/api/v1/metrics", headers={"X-API-Key": "tenant-a-key"})
+    second = client.get("/api/v1/metrics", headers={"X-API-Key": "tenant-a-key"})
+    third = client.get("/api/v1/metrics", headers={"X-API-Key": "tenant-a-key"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 429
+    assert third.json()["error"]["code"] == "RATE_LIMITED"
+
+
+def test_tenant_daily_quota_returns_429(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "tenant-a-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "tenant-a-key:operator")
+    monkeypatch.setenv("API_AUTH_TENANT_MAP", "tenant-a-key:tenant-a")
+    monkeypatch.setenv("API_RATE_LIMIT_PER_MINUTE", "0")
+    monkeypatch.setenv("API_DAILY_QUOTA", "2")
+    client = TestClient(create_app())
+
+    first = client.get("/api/v1/metrics", headers={"X-API-Key": "tenant-a-key"})
+    second = client.get("/api/v1/metrics", headers={"X-API-Key": "tenant-a-key"})
+    third = client.get("/api/v1/metrics", headers={"X-API-Key": "tenant-a-key"})
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 429
+    assert third.json()["error"]["code"] == "QUOTA_EXCEEDED"
