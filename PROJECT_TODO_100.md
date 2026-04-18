@@ -76,11 +76,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 10: Identity and Proxy Management
 
-46. [ ] Add proxy pool persistence with health history.
-47. [ ] Add weighted allocator by region and failure rate.
-48. [ ] Add sticky identity policy with cool-down windows.
-49. [ ] Add identity rotation audit trail and reason codes.
-50. [ ] Add tests for proxy quarantine and unquarantine flow.
+46. [x] Add proxy pool persistence with health history.
+47. [x] Add weighted allocator by region and failure rate.
+48. [x] Add sticky identity policy with cool-down windows.
+49. [x] Add identity rotation audit trail and reason codes.
+50. [x] Add tests for proxy quarantine and unquarantine flow.
 
 ## Feature 11: Policy and Compliance Controls
 
