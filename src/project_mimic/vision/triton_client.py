@@ -24,6 +24,7 @@ from ..reliability import (
     TransientDependencyError,
     retry_with_backoff,
 )
+from ..security import MTLSConfig, assert_outbound_host_allowed, redact_sensitive_text
 
 
 class TritonInferenceError(RuntimeError):
@@ -35,6 +36,8 @@ class TritonConfig:
     endpoint: str
     model_name: str
     timeout_s: float = 5.0
+    allowed_hosts: tuple[str, ...] = ()
+    mtls: MTLSConfig | None = None
 
 
 class TritonVisionClient:
@@ -50,7 +53,17 @@ class TritonVisionClient:
         sleep_fn=time.sleep,
     ) -> None:
         self.config = config
-        self._client = client or httpx.Client(timeout=config.timeout_s)
+        if config.allowed_hosts:
+            assert_outbound_host_allowed(config.endpoint, set(config.allowed_hosts))
+
+        if client is not None:
+            self._client = client
+        else:
+            client_kwargs: dict[str, Any] = {"timeout": config.timeout_s}
+            if config.mtls and config.mtls.enabled:
+                client_kwargs["verify"] = config.mtls.ca_cert_path
+                client_kwargs["cert"] = (config.mtls.client_cert_path, config.mtls.client_key_path)
+            self._client = httpx.Client(**client_kwargs)
         self._cache = VisionTemporalCache()
         self._circuit_breaker = circuit_breaker or CircuitBreaker(
             CircuitBreakerConfig(failure_threshold=3, recovery_timeout_seconds=8.0)
@@ -105,7 +118,7 @@ class TritonVisionClient:
                 on_retry=lambda _attempt, delay_ms, _err: self._sleep(delay_ms / 1000.0),
             )
         except (TransientDependencyError, CircuitOpenError) as exc:
-            raise TritonInferenceError(str(exc)) from exc
+            raise TritonInferenceError(redact_sensitive_text(str(exc))) from exc
 
     def infer_entities(
         self,

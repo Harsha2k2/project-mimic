@@ -18,6 +18,7 @@ from .error_mapping import map_exception_to_error
 from .engine import ExecutionEngine
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
+from .security import redact_sensitive_structure, redact_sensitive_text
 from .orchestrator.decision_orchestrator import DecisionOrchestrator
 from .session_lifecycle import (
     InvalidSessionTransitionError,
@@ -205,12 +206,13 @@ def create_app() -> FastAPI:
         details: list[dict[str, Any]] | None = None,
     ) -> JSONResponse:
         correlation_id = getattr(request.state, "request_id", None)
+        safe_message = redact_sensitive_text(message)
         payload = APIErrorResponse(
             error=APIError(
                 code=code.value if isinstance(code, APIErrorCode) else str(code),
-                message=message,
+                message=safe_message,
                 correlation_id=correlation_id,
-                details=details or [],
+                details=redact_sensitive_structure(details or []),
             )
         )
         return JSONResponse(status_code=status_code, content=payload.model_dump())

@@ -108,11 +108,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 14: Security and Secrets
 
-66. [ ] Add secret loading abstraction for local and cloud.
-67. [ ] Add token redaction in logs and exception traces.
-68. [ ] Add mTLS configuration model for internal gRPC traffic.
-69. [ ] Add allowlist validation for outbound target hosts.
-70. [ ] Add tests ensuring sensitive values never leak to logs.
+66. [x] Add secret loading abstraction for local and cloud.
+67. [x] Add token redaction in logs and exception traces.
+68. [x] Add mTLS configuration model for internal gRPC traffic.
+69. [x] Add allowlist validation for outbound target hosts.
+70. [x] Add tests ensuring sensitive values never leak to logs.
 
 ## Feature 15: Kubernetes and Scaling
 
