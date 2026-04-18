@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimic-triton
+  namespace: project-mimic
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mimic-triton
+  template:
+    metadata:
+      labels:
+        app: mimic-triton
+    spec:
+      nodeSelector:
+        workload: gpu
+      containers:
+        - name: triton
+          image: nvcr.io/nvidia/tritonserver:24.07-py3
+          imagePullPolicy: IfNotPresent
+          args:
+            - tritonserver
+            - --model-repository=/models
+          ports:
+            - containerPort: 8000
+              name: http
+            - containerPort: 8001
+              name: grpc
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              cpu: "1000m"
+              memory: "2Gi"
+              nvidia.com/gpu: "1"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mimic-triton
+  namespace: project-mimic
+spec:
+  selector:
+    app: mimic-triton
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: grpc
+      port: 8001
+      targetPort: 8001

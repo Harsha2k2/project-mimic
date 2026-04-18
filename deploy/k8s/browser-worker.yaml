@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimic-browser-worker
+  namespace: project-mimic
+spec:
+  replicas: 4
+  selector:
+    matchLabels:
+      app: mimic-browser-worker
+  template:
+    metadata:
+      labels:
+        app: mimic-browser-worker
+    spec:
+      containers:
+        - name: playwright-runtime
+          image: ghcr.io/harsha2k2/project-mimic-worker:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: TRITON_ENDPOINT
+              value: http://mimic-triton.project-mimic.svc.cluster.local:8000
+            - name: PROXY_GATEWAY
+              value: http://mimic-proxy.project-mimic.svc.cluster.local:8080
+        - name: mimetic-sidecar
+          image: ghcr.io/harsha2k2/project-mimic-mimetic:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: RUST_LOG
+              value: info

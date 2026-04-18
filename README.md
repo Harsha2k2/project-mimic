@@ -28,3 +28,7 @@ python inference.py
 
 - `openenv.yaml` defines environment metadata, tasks, and runtime variables.
 - `inference.py` runs baseline evaluation over easy, medium, and hard tasks.
+
+## Deployment Manifests
+
+- `deploy/k8s/` contains namespace, control plane, browser worker, Triton GPU, and KEDA scaler manifests.

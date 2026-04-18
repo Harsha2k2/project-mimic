@@ -1,0 +1,39 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: mimic-browser-worker-scaler
+  namespace: project-mimic
+spec:
+  scaleTargetRef:
+    name: mimic-browser-worker
+  minReplicaCount: 2
+  maxReplicaCount: 50
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        metricName: pending_browser_sessions
+        query: sum(pending_browser_sessions)
+        threshold: "20"
+---
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: mimic-triton-scaler
+  namespace: project-mimic
+spec:
+  scaleTargetRef:
+    name: mimic-triton
+  minReplicaCount: 1
+  maxReplicaCount: 20
+  pollingInterval: 15
+  cooldownPeriod: 90
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus.monitoring.svc.cluster.local:9090
+        metricName: triton_inference_queue_depth
+        query: sum(triton_inference_queue_depth)
+        threshold: "10"

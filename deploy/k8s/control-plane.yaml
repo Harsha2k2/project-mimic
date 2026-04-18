@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimic-control-plane
+  namespace: project-mimic
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mimic-control-plane
+  template:
+    metadata:
+      labels:
+        app: mimic-control-plane
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/harsha2k2/project-mimic-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: LOG_LEVEL
+              value: info
+            - name: REDIS_URL
+              value: redis://redis.project-mimic.svc.cluster.local:6379
+            - name: POSTGRES_URL
+              value: postgresql://postgres.project-mimic.svc.cluster.local:5432/mimic
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mimic-control-plane
+  namespace: project-mimic
+spec:
+  selector:
+    app: mimic-control-plane
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8000
