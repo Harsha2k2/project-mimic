@@ -84,11 +84,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 11: Policy and Compliance Controls
 
-51. [ ] Add policy rule registry with priority ordering.
-52. [ ] Add policy simulation mode for dry-run evaluations.
-53. [ ] Add jurisdiction-based policy override support.
-54. [ ] Add policy decision explanation payloads for audit.
-55. [ ] Add tests for conflicting policy resolution behavior.
+51. [x] Add policy rule registry with priority ordering.
+52. [x] Add policy simulation mode for dry-run evaluations.
+53. [x] Add jurisdiction-based policy override support.
+54. [x] Add policy decision explanation payloads for audit.
+55. [x] Add tests for conflicting policy resolution behavior.
 
 ## Feature 12: Observability and Tracing
 
