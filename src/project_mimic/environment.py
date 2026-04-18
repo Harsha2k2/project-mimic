@@ -83,6 +83,16 @@ class ProjectMimicEnv:
             "max_steps": self._max_steps,
         }
 
+    def load_state(self, payload: dict[str, Any]) -> Observation:
+        self._state.goal = str(payload.get("goal", self._state.goal))
+        self._state.step_index = int(payload.get("step_index", 0))
+        self._state.status = str(payload.get("status", "running"))
+        self._state.done = bool(payload.get("done", False))
+        self._state.history = list(payload.get("history", []))
+        self._state.last_url = payload.get("last_url")
+        self._max_steps = int(payload.get("max_steps", self._max_steps))
+        return self._observation(last_event="restore")
+
     def _observation(self, last_event: str | None) -> Observation:
         return Observation(
             step_index=self._state.step_index,

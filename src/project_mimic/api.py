@@ -300,6 +300,22 @@ def create_app() -> FastAPI:
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="checkpoint not found") from exc
 
+    def _rollback_session(session_id: str) -> dict[str, Any]:
+        try:
+            return registry.rollback_to_checkpoint(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def _resume_session(session_id: str) -> dict[str, Any]:
+        try:
+            return registry.resume_from_checkpoint(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     def _decide_click(payload: DecideRequest) -> DecideResponse:
         entities = [
             UIEntity(
@@ -559,6 +575,24 @@ def create_app() -> FastAPI:
     def restore_session_legacy(session_id: str, response: Response) -> dict[str, Any]:
         _set_deprecation_headers(response)
         return _restore_session(session_id)
+
+    @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/rollback")
+    def rollback_session_v1(session_id: str) -> dict[str, Any]:
+        return _rollback_session(session_id)
+
+    @app.post("/sessions/{session_id}/rollback", deprecated=True)
+    def rollback_session_legacy(session_id: str, response: Response) -> dict[str, Any]:
+        _set_deprecation_headers(response)
+        return _rollback_session(session_id)
+
+    @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/resume")
+    def resume_session_v1(session_id: str) -> dict[str, Any]:
+        return _resume_session(session_id)
+
+    @app.post("/sessions/{session_id}/resume", deprecated=True)
+    def resume_session_legacy(session_id: str, response: Response) -> dict[str, Any]:
+        _set_deprecation_headers(response)
+        return _resume_session(session_id)
 
     @app.post(
         f"{API_V1_PREFIX}/decision/click",

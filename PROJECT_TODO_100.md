@@ -100,11 +100,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 13: Reliability and Recovery
 
-61. [ ] Add circuit breaker for unstable external dependencies.
-62. [ ] Add exponential backoff with jitter for transient errors.
-63. [ ] Add checkpoint rollback and resume workflow.
-64. [ ] Add failure taxonomy with standardized error classes.
-65. [ ] Add chaos tests for worker restart and timeout paths.
+61. [x] Add circuit breaker for unstable external dependencies.
+62. [x] Add exponential backoff with jitter for transient errors.
+63. [x] Add checkpoint rollback and resume workflow.
+64. [x] Add failure taxonomy with standardized error classes.
+65. [x] Add chaos tests for worker restart and timeout paths.
 
 ## Feature 14: Security and Secrets
 

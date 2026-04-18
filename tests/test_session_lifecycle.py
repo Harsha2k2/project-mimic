@@ -47,3 +47,23 @@ def test_reset_disallowed_for_terminal_session() -> None:
 
     with pytest.raises(InvalidSessionTransitionError):
         registry.reset(session_id)
+
+
+def test_rollback_and_resume_restore_checkpoint_state() -> None:
+    store = InMemoryCheckpointStore()
+    registry = SessionRegistry(ttl_seconds=100, checkpoint_store=store)
+
+    session_id, _ = registry.create(goal="rollback-goal", max_steps=4)
+    env = registry.get(session_id)
+    env.step(UIAction(action_type=ActionType.CLICK, target="search"))
+    registry.save_checkpoint(session_id)
+
+    env.step(UIAction(action_type=ActionType.CLICK, target="offer"))
+    state_before = env.state()
+    assert state_before["step_index"] == 2
+
+    rolled_back = registry.rollback_to_checkpoint(session_id)
+    assert rolled_back["step_index"] == 1
+
+    resumed = registry.resume_from_checkpoint(session_id)
+    assert resumed["step_index"] == 1

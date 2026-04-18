@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from .environment import ProjectMimicEnv
 from .models import Observation, UIAction
+from .reliability import CheckpointRecoveryError
 
 
 class SessionStatus(str, Enum):
@@ -160,6 +161,28 @@ class SessionRegistry:
         if payload is None:
             raise KeyError(session_id)
         return payload
+
+    def rollback_to_checkpoint(self, session_id: str) -> dict:
+        record = self.get_record(session_id)
+        payload = self._checkpoint_store.load(session_id)
+        if payload is None:
+            raise CheckpointRecoveryError("checkpoint not found")
+
+        state_payload = payload.get("state")
+        if not isinstance(state_payload, dict):
+            raise CheckpointRecoveryError("checkpoint payload missing state")
+
+        record.env.load_state(state_payload)
+        if record.status not in (SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.EXPIRED):
+            self._transition(record, SessionStatus.RUNNING)
+
+        record.last_accessed_at = self._now()
+        record.expires_at = record.last_accessed_at + self._ttl_seconds
+        self._persist_checkpoint(session_id, record)
+        return record.env.state()
+
+    def resume_from_checkpoint(self, session_id: str) -> dict:
+        return self.rollback_to_checkpoint(session_id)
 
     def mark_completed(self, session_id: str) -> None:
         record = self.get_record(session_id)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass
+import time
 from typing import Any
 
 import httpx
@@ -14,6 +15,14 @@ from .pipeline import (
     apply_role_thresholds,
     deduplicate_entities,
     normalize_ocr_text,
+)
+from ..reliability import (
+    BackoffPolicy,
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitOpenError,
+    TransientDependencyError,
+    retry_with_backoff,
 )
 
 
@@ -31,28 +40,72 @@ class TritonConfig:
 class TritonVisionClient:
     """Small HTTP adapter for Triton infer endpoint."""
 
-    def __init__(self, config: TritonConfig, client: httpx.Client | None = None) -> None:
+    def __init__(
+        self,
+        config: TritonConfig,
+        client: httpx.Client | None = None,
+        *,
+        circuit_breaker: CircuitBreaker | None = None,
+        backoff_policy: BackoffPolicy | None = None,
+        sleep_fn=time.sleep,
+    ) -> None:
         self.config = config
         self._client = client or httpx.Client(timeout=config.timeout_s)
         self._cache = VisionTemporalCache()
+        self._circuit_breaker = circuit_breaker or CircuitBreaker(
+            CircuitBreakerConfig(failure_threshold=3, recovery_timeout_seconds=8.0)
+        )
+        self._backoff_policy = backoff_policy or BackoffPolicy(
+            base_delay_ms=75,
+            max_delay_ms=500,
+            jitter_ratio=0.15,
+            max_attempts=3,
+        )
+        self._sleep = sleep_fn
 
     def infer(self, screenshot: bytes, task_hint: str = "") -> dict[str, Any]:
         payload = _build_payload(screenshot=screenshot, task_hint=task_hint)
         url = f"{self.config.endpoint}/v2/models/{self.config.model_name}/infer"
-        response = self._client.post(url, json=payload)
 
-        if response.status_code >= 400:
-            raise TritonInferenceError(f"triton error status={response.status_code}")
+        def _request_once() -> dict[str, Any]:
+            if not self._circuit_breaker.allow_request():
+                raise CircuitOpenError("triton circuit open")
+
+            try:
+                response = self._client.post(url, json=payload)
+            except Exception as exc:
+                self._circuit_breaker.record_failure()
+                raise TransientDependencyError("triton transport failure") from exc
+
+            if response.status_code >= 500:
+                self._circuit_breaker.record_failure()
+                raise TransientDependencyError(f"triton transient error status={response.status_code}")
+            if response.status_code >= 400:
+                self._circuit_breaker.record_failure()
+                raise TritonInferenceError(f"triton error status={response.status_code}")
+
+            try:
+                data = response.json()
+            except ValueError as exc:
+                self._circuit_breaker.record_failure()
+                raise TritonInferenceError("triton returned non-json response") from exc
+
+            if "entities" not in data:
+                self._circuit_breaker.record_failure()
+                raise TritonInferenceError("triton response missing entities")
+
+            self._circuit_breaker.record_success()
+            return data
 
         try:
-            data = response.json()
-        except ValueError as exc:
-            raise TritonInferenceError("triton returned non-json response") from exc
-
-        if "entities" not in data:
-            raise TritonInferenceError("triton response missing entities")
-
-        return data
+            return retry_with_backoff(
+                _request_once,
+                policy=self._backoff_policy,
+                is_transient=lambda exc: isinstance(exc, (TransientDependencyError, CircuitOpenError)),
+                on_retry=lambda _attempt, delay_ms, _err: self._sleep(delay_ms / 1000.0),
+            )
+        except (TransientDependencyError, CircuitOpenError) as exc:
+            raise TritonInferenceError(str(exc)) from exc
 
     def infer_entities(
         self,
