@@ -36,3 +36,36 @@ jobs:
 
       - name: Run Rust tests
         run: cargo test --manifest-path rust/mimetic/Cargo.toml
+
+  baseline-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Run deterministic baseline
+        run: python inference.py > baseline_output.json
+
+      - name: Validate baseline output shape
+        run: |
+          python - <<'PY'
+          import json
+
+          with open("baseline_output.json", "r", encoding="utf-8") as handle:
+              payload = json.load(handle)
+
+          assert "mode" in payload
+          assert "average_score" in payload
+          assert isinstance(payload.get("results"), list)
+          assert len(payload["results"]) == 3
+          PY
