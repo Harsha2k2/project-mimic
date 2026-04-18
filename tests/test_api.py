@@ -277,3 +277,51 @@ def test_api_rbac_allows_viewer_read_only_routes(monkeypatch) -> None:
         headers={"X-API-Key": "viewer-key"},
     )
     assert allowed.status_code == 200
+
+
+def test_tenant_isolation_blocks_cross_tenant_state_access(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "tenant-a-key,tenant-b-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "tenant-a-key:operator,tenant-b-key:operator")
+    monkeypatch.setenv("API_AUTH_TENANT_MAP", "tenant-a-key:tenant-a,tenant-b-key:tenant-b")
+    client = TestClient(create_app())
+
+    created = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": "tenant-a-key"},
+        json={"goal": "tenant-a-session", "max_steps": 3},
+    )
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    denied = client.get(
+        f"/api/v1/sessions/{session_id}/state",
+        headers={"X-API-Key": "tenant-b-key"},
+    )
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_tenant_isolation_filters_session_listing(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "tenant-a-key,tenant-b-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "tenant-a-key:operator,tenant-b-key:operator")
+    monkeypatch.setenv("API_AUTH_TENANT_MAP", "tenant-a-key:tenant-a,tenant-b-key:tenant-b")
+    client = TestClient(create_app())
+
+    response_a = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": "tenant-a-key"},
+        json={"goal": "tenant-a", "max_steps": 2},
+    )
+    response_b = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": "tenant-b-key"},
+        json={"goal": "tenant-b", "max_steps": 2},
+    )
+    assert response_a.status_code == 200
+    assert response_b.status_code == 200
+
+    listed = client.get("/api/v1/sessions", headers={"X-API-Key": "tenant-a-key"})
+    assert listed.status_code == 200
+    items = listed.json()["items"]
+    assert items
+    assert all(item["tenant_id"] == "tenant-a" for item in items)

@@ -103,6 +103,7 @@ from .security import (
 from .session_lifecycle import (
     InMemoryCheckpointStore,
     InvalidSessionTransitionError,
+    SessionAccessDeniedError,
     RedisCheckpointStore,
     SessionExpiredError,
     SessionRegistry,
@@ -181,6 +182,7 @@ __all__ = [
     "RustPythonEventBridge",
     "OrchestratorServiceHandler",
     "SessionExpiredError",
+    "SessionAccessDeniedError",
     "SessionRegistry",
     "SessionServiceHandler",
     "SessionStatus",

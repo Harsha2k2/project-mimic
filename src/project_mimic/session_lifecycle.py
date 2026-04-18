@@ -84,6 +84,7 @@ class SessionRecord:
     created_at: float
     last_accessed_at: float
     expires_at: float
+    tenant_id: str = "default"
 
 
 class SessionExpiredError(RuntimeError):
@@ -91,6 +92,10 @@ class SessionExpiredError(RuntimeError):
 
 
 class InvalidSessionTransitionError(RuntimeError):
+    pass
+
+
+class SessionAccessDeniedError(RuntimeError):
     pass
 
 
@@ -109,7 +114,7 @@ class SessionRegistry:
         self._records: dict[str, SessionRecord] = {}
         self._now = now_fn
 
-    def create(self, goal: str, max_steps: int) -> tuple[str, Observation]:
+    def create(self, goal: str, max_steps: int, tenant_id: str = "default") -> tuple[str, Observation]:
         session_id = str(uuid4())
         env = ProjectMimicEnv(goal=goal, max_steps=max_steps)
         observation = env.reset()
@@ -121,31 +126,34 @@ class SessionRegistry:
             created_at=now,
             last_accessed_at=now,
             expires_at=now + self._ttl_seconds,
+            tenant_id=tenant_id,
         )
         self._records[session_id] = record
         self._transition(record, SessionStatus.RUNNING)
         self._persist_checkpoint(session_id, record)
         return session_id, observation
 
-    def get(self, session_id: str) -> ProjectMimicEnv:
+    def get(self, session_id: str, tenant_id: str | None = None) -> ProjectMimicEnv:
         record = self._records.get(session_id)
         if record is None:
             raise KeyError(session_id)
 
+        self._ensure_tenant_access(record, tenant_id)
         self._ensure_not_expired(record)
         record.last_accessed_at = self._now()
         return record.env
 
-    def get_record(self, session_id: str) -> SessionRecord:
+    def get_record(self, session_id: str, tenant_id: str | None = None) -> SessionRecord:
         record = self._records.get(session_id)
         if record is None:
             raise KeyError(session_id)
 
+        self._ensure_tenant_access(record, tenant_id)
         self._ensure_not_expired(record)
         return record
 
-    def reset(self, session_id: str, goal: str | None = None) -> Observation:
-        record = self.get_record(session_id)
+    def reset(self, session_id: str, goal: str | None = None, tenant_id: str | None = None) -> Observation:
+        record = self.get_record(session_id, tenant_id=tenant_id)
         if record.status in (SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.EXPIRED):
             raise InvalidSessionTransitionError("cannot reset terminal session")
 
@@ -156,14 +164,18 @@ class SessionRegistry:
         self._persist_checkpoint(session_id, record)
         return observation
 
-    def restore(self, session_id: str) -> dict:
+    def restore(self, session_id: str, tenant_id: str | None = None) -> dict:
         payload = self._checkpoint_store.load(session_id)
         if payload is None:
             raise KeyError(session_id)
+
+        checkpoint_tenant = str(payload.get("tenant_id", "default"))
+        if tenant_id is not None and checkpoint_tenant != tenant_id:
+            raise SessionAccessDeniedError("session does not belong to tenant")
         return payload
 
-    def rollback_to_checkpoint(self, session_id: str) -> dict:
-        record = self.get_record(session_id)
+    def rollback_to_checkpoint(self, session_id: str, tenant_id: str | None = None) -> dict:
+        record = self.get_record(session_id, tenant_id=tenant_id)
         payload = self._checkpoint_store.load(session_id)
         if payload is None:
             raise CheckpointRecoveryError("checkpoint not found")
@@ -181,26 +193,26 @@ class SessionRegistry:
         self._persist_checkpoint(session_id, record)
         return record.env.state()
 
-    def resume_from_checkpoint(self, session_id: str) -> dict:
-        return self.rollback_to_checkpoint(session_id)
+    def resume_from_checkpoint(self, session_id: str, tenant_id: str | None = None) -> dict:
+        return self.rollback_to_checkpoint(session_id, tenant_id=tenant_id)
 
-    def mark_completed(self, session_id: str) -> None:
-        record = self.get_record(session_id)
+    def mark_completed(self, session_id: str, tenant_id: str | None = None) -> None:
+        record = self.get_record(session_id, tenant_id=tenant_id)
         self._transition(record, SessionStatus.COMPLETED)
         self._persist_checkpoint(session_id, record)
 
-    def mark_failed(self, session_id: str) -> None:
-        record = self.get_record(session_id)
+    def mark_failed(self, session_id: str, tenant_id: str | None = None) -> None:
+        record = self.get_record(session_id, tenant_id=tenant_id)
         self._transition(record, SessionStatus.FAILED)
         self._persist_checkpoint(session_id, record)
 
-    def pause(self, session_id: str) -> None:
-        record = self.get_record(session_id)
+    def pause(self, session_id: str, tenant_id: str | None = None) -> None:
+        record = self.get_record(session_id, tenant_id=tenant_id)
         self._transition(record, SessionStatus.PAUSED)
         self._persist_checkpoint(session_id, record)
 
-    def resume(self, session_id: str) -> None:
-        record = self.get_record(session_id)
+    def resume(self, session_id: str, tenant_id: str | None = None) -> None:
+        record = self.get_record(session_id, tenant_id=tenant_id)
         self._transition(record, SessionStatus.RUNNING)
         self._persist_checkpoint(session_id, record)
 
@@ -214,6 +226,7 @@ class SessionRegistry:
         sort_order: str = "desc",
         page: int = 1,
         page_size: int = 50,
+        tenant_id: str | None = None,
     ) -> dict:
         if page <= 0 or page_size <= 0:
             raise ValueError("page and page_size must be positive")
@@ -226,6 +239,8 @@ class SessionRegistry:
         items = []
         for session_id, record in self._records.items():
             if status is not None and record.status != status:
+                continue
+            if tenant_id is not None and record.tenant_id != tenant_id:
                 continue
 
             goal = str(record.env.state().get("goal", ""))
@@ -244,6 +259,7 @@ class SessionRegistry:
                     "created_at": record.created_at,
                     "last_accessed_at": record.last_accessed_at,
                     "expires_at": record.expires_at,
+                    "tenant_id": record.tenant_id,
                 }
             )
 
@@ -265,6 +281,7 @@ class SessionRegistry:
                 "goal_contains": goal_contains,
                 "created_after": created_after,
                 "created_before": created_before,
+                "tenant_id": tenant_id,
             },
         }
 
@@ -291,6 +308,7 @@ class SessionRegistry:
             "created_at": record.created_at,
             "last_accessed_at": record.last_accessed_at,
             "expires_at": record.expires_at,
+            "tenant_id": record.tenant_id,
         }
         self._checkpoint_store.save(session_id, payload)
 
@@ -305,3 +323,10 @@ class SessionRegistry:
         if self._now() > record.expires_at:
             self._transition(record, SessionStatus.EXPIRED)
             raise SessionExpiredError("session expired")
+
+    @staticmethod
+    def _ensure_tenant_access(record: SessionRecord, tenant_id: str | None) -> None:
+        if tenant_id is None:
+            return
+        if record.tenant_id != tenant_id:
+            raise SessionAccessDeniedError("session does not belong to tenant")

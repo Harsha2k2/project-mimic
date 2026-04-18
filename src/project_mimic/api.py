@@ -22,6 +22,7 @@ from .security import redact_sensitive_structure, redact_sensitive_text
 from .orchestrator.decision_orchestrator import DecisionOrchestrator
 from .session_lifecycle import (
     InvalidSessionTransitionError,
+    SessionAccessDeniedError,
     SessionExpiredError,
     SessionRegistry,
     SessionStatus,
@@ -190,6 +191,12 @@ def create_app() -> FastAPI:
     default_role = os.getenv("API_AUTH_DEFAULT_ROLE", "operator").strip().lower()
     if default_role not in role_rank:
         default_role = "operator"
+    default_tenant = os.getenv("API_DEFAULT_TENANT", "default").strip() or "default"
+    tenant_enforcement = os.getenv("API_TENANT_ENFORCEMENT", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+    }
 
     role_map: dict[str, str] = {}
     for pair in os.getenv("API_AUTH_ROLE_MAP", "").split(","):
@@ -201,6 +208,17 @@ def create_app() -> FastAPI:
         role = role.strip().lower()
         if key and role in role_rank:
             role_map[key] = role
+
+    tenant_map: dict[str, str] = {}
+    for pair in os.getenv("API_AUTH_TENANT_MAP", "").split(","):
+        cleaned = pair.strip()
+        if not cleaned or ":" not in cleaned:
+            continue
+        key, tenant = cleaned.split(":", 1)
+        key = key.strip()
+        tenant = tenant.strip()
+        if key and tenant:
+            tenant_map[key] = tenant
 
     registry = SessionRegistry(ttl_seconds=session_ttl_seconds)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -224,6 +242,9 @@ def create_app() -> FastAPI:
         if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
             return "operator"
         return "viewer"
+
+    def _tenant_id(request: Request) -> str:
+        return str(getattr(request.state, "tenant_id", default_tenant))
 
     def _error_response(
         request: Request,
@@ -253,49 +274,61 @@ def create_app() -> FastAPI:
             return APIErrorCode.SESSION_EXPIRED
         if exc.status_code == 409:
             return APIErrorCode.SESSION_CONFLICT
+        if exc.status_code == 403:
+            return APIErrorCode.FORBIDDEN
         if exc.status_code == 422:
             return APIErrorCode.VALIDATION_ERROR
         return APIErrorCode.INTERNAL_ERROR
 
-    def _create_session(payload: CreateSessionRequest) -> SessionCreatedResponse:
-        session_id, observation = registry.create(goal=payload.goal, max_steps=payload.max_steps)
+    def _create_session(payload: CreateSessionRequest, tenant_id: str) -> SessionCreatedResponse:
+        session_id, observation = registry.create(
+            goal=payload.goal,
+            max_steps=payload.max_steps,
+            tenant_id=tenant_id,
+        )
         return SessionCreatedResponse(session_id=session_id, observation=observation)
 
-    def _reset_session(session_id: str, payload: ResetSessionRequest) -> Observation:
+    def _reset_session(session_id: str, payload: ResetSessionRequest, tenant_id: str) -> Observation:
         try:
-            return registry.reset(session_id=session_id, goal=payload.goal)
+            return registry.reset(session_id=session_id, goal=payload.goal, tenant_id=tenant_id)
         except SessionExpiredError as exc:
             raise HTTPException(status_code=410, detail=str(exc)) from exc
         except InvalidSessionTransitionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SessionAccessDeniedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
 
-    def _step_session(session_id: str, action: UIAction) -> StepResponse:
+    def _step_session(session_id: str, action: UIAction, tenant_id: str) -> StepResponse:
         try:
-            env = registry.get(session_id)
+            env = registry.get(session_id, tenant_id=tenant_id)
         except SessionExpiredError as exc:
             raise HTTPException(status_code=410, detail=str(exc)) from exc
+        except SessionAccessDeniedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
 
         try:
             observation, reward, done, info = env.step(action)
             if done:
-                registry.mark_completed(session_id)
+                registry.mark_completed(session_id, tenant_id=tenant_id)
             else:
                 registry.save_checkpoint(session_id)
         except RuntimeError as exc:
-            registry.mark_failed(session_id)
+            registry.mark_failed(session_id, tenant_id=tenant_id)
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         return StepResponse(observation=observation, reward=reward, done=done, info=info)
 
-    def _state_session(session_id: str) -> dict[str, Any]:
+    def _state_session(session_id: str, tenant_id: str) -> dict[str, Any]:
         try:
-            env = registry.get(session_id)
+            env = registry.get(session_id, tenant_id=tenant_id)
         except SessionExpiredError as exc:
             raise HTTPException(status_code=410, detail=str(exc)) from exc
+        except SessionAccessDeniedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
 
@@ -310,6 +343,7 @@ def create_app() -> FastAPI:
         sort_order: str,
         page: int,
         page_size: int,
+        tenant_id: str,
     ) -> SessionListResponse:
         filter_status = SessionStatus(status) if status else None
         result = registry.list_sessions(
@@ -321,26 +355,33 @@ def create_app() -> FastAPI:
             sort_order=sort_order,
             page=page,
             page_size=page_size,
+            tenant_id=tenant_id,
         )
         return SessionListResponse(**result)
 
-    def _restore_session(session_id: str) -> dict[str, Any]:
+    def _restore_session(session_id: str, tenant_id: str) -> dict[str, Any]:
         try:
-            return registry.restore(session_id)
+            return registry.restore(session_id, tenant_id=tenant_id)
+        except SessionAccessDeniedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="checkpoint not found") from exc
 
-    def _rollback_session(session_id: str) -> dict[str, Any]:
+    def _rollback_session(session_id: str, tenant_id: str) -> dict[str, Any]:
         try:
-            return registry.rollback_to_checkpoint(session_id)
+            return registry.rollback_to_checkpoint(session_id, tenant_id=tenant_id)
+        except SessionAccessDeniedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
-    def _resume_session(session_id: str) -> dict[str, Any]:
+    def _resume_session(session_id: str, tenant_id: str) -> dict[str, Any]:
         try:
-            return registry.resume_from_checkpoint(session_id)
+            return registry.resume_from_checkpoint(session_id, tenant_id=tenant_id)
+        except SessionAccessDeniedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
         except RuntimeError as exc:
@@ -424,6 +465,35 @@ def create_app() -> FastAPI:
                 forbidden_response.headers["X-Correlation-ID"] = request_id
                 return forbidden_response
 
+            mapped_tenant = tenant_map.get(provided_key)
+            header_tenant = request.headers.get("x-tenant-id", "").strip()
+            if mapped_tenant and header_tenant and mapped_tenant != header_tenant:
+                tenant_conflict = _error_response(
+                    request,
+                    status_code=403,
+                    code=APIErrorCode.FORBIDDEN,
+                    message="tenant header does not match key scope",
+                )
+                tenant_conflict.headers["X-Request-ID"] = request_id
+                tenant_conflict.headers["X-Correlation-ID"] = request_id
+                return tenant_conflict
+
+            resolved_tenant = header_tenant or mapped_tenant or default_tenant
+            if tenant_enforcement and not resolved_tenant:
+                tenant_missing = _error_response(
+                    request,
+                    status_code=403,
+                    code=APIErrorCode.FORBIDDEN,
+                    message="tenant scope is required",
+                )
+                tenant_missing.headers["X-Request-ID"] = request_id
+                tenant_missing.headers["X-Correlation-ID"] = request_id
+                return tenant_missing
+
+            request.state.tenant_id = resolved_tenant
+        else:
+            request.state.tenant_id = request.headers.get("x-tenant-id", "").strip() or default_tenant
+
         start = time.perf_counter()
         with api_tracer.start_span(
             "api.request",
@@ -503,7 +573,7 @@ def create_app() -> FastAPI:
 
     @app.post(f"{API_V1_PREFIX}/sessions", response_model=SessionCreatedResponse)
     def create_session_v1(payload: CreateSessionRequest, request: Request) -> SessionCreatedResponse:
-        response = _create_session(payload)
+        response = _create_session(payload, tenant_id=_tenant_id(request))
         metrics.record_feature_result(
             "session.create",
             success=True,
@@ -520,7 +590,7 @@ def create_app() -> FastAPI:
         request: Request,
     ) -> SessionCreatedResponse:
         _set_deprecation_headers(response)
-        created = _create_session(payload)
+        created = _create_session(payload, tenant_id=_tenant_id(request))
         metrics.record_feature_result(
             "session.create",
             success=True,
@@ -531,17 +601,22 @@ def create_app() -> FastAPI:
         return created
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/reset", response_model=Observation)
-    def reset_session_v1(session_id: str, payload: ResetSessionRequest) -> Observation:
-        return _reset_session(session_id, payload)
+    def reset_session_v1(session_id: str, payload: ResetSessionRequest, request: Request) -> Observation:
+        return _reset_session(session_id, payload, tenant_id=_tenant_id(request))
 
     @app.post("/sessions/{session_id}/reset", response_model=Observation, deprecated=True)
-    def reset_session_legacy(session_id: str, payload: ResetSessionRequest, response: Response) -> Observation:
+    def reset_session_legacy(
+        session_id: str,
+        payload: ResetSessionRequest,
+        response: Response,
+        request: Request,
+    ) -> Observation:
         _set_deprecation_headers(response)
-        return _reset_session(session_id, payload)
+        return _reset_session(session_id, payload, tenant_id=_tenant_id(request))
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/step", response_model=StepResponse)
     def step_session_v1(session_id: str, action: UIAction, request: Request) -> StepResponse:
-        response = _step_session(session_id, action)
+        response = _step_session(session_id, action, tenant_id=_tenant_id(request))
         goal = response.observation.goal
         metrics.record_feature_result(
             "session.step",
@@ -560,7 +635,7 @@ def create_app() -> FastAPI:
         request: Request,
     ) -> StepResponse:
         _set_deprecation_headers(response)
-        step_response = _step_session(session_id, action)
+        step_response = _step_session(session_id, action, tenant_id=_tenant_id(request))
         metrics.record_feature_result(
             "session.step",
             success=True,
@@ -571,16 +646,17 @@ def create_app() -> FastAPI:
         return step_response
 
     @app.get(f"{API_V1_PREFIX}/sessions/{{session_id}}/state")
-    def state_session_v1(session_id: str) -> dict[str, Any]:
-        return _state_session(session_id)
+    def state_session_v1(session_id: str, request: Request) -> dict[str, Any]:
+        return _state_session(session_id, tenant_id=_tenant_id(request))
 
     @app.get("/sessions/{session_id}/state", deprecated=True)
-    def state_session_legacy(session_id: str, response: Response) -> dict[str, Any]:
+    def state_session_legacy(session_id: str, response: Response, request: Request) -> dict[str, Any]:
         _set_deprecation_headers(response)
-        return _state_session(session_id)
+        return _state_session(session_id, tenant_id=_tenant_id(request))
 
     @app.get(f"{API_V1_PREFIX}/sessions", response_model=SessionListResponse)
     def list_sessions_v1(
+        request: Request,
         status: str | None = Query(default=None),
         goal_contains: str | None = Query(default=None, min_length=1),
         created_after: float | None = Query(default=None, ge=0),
@@ -599,11 +675,13 @@ def create_app() -> FastAPI:
             sort_order=sort_order,
             page=page,
             page_size=page_size,
+            tenant_id=_tenant_id(request),
         )
 
     @app.get("/sessions", response_model=SessionListResponse, deprecated=True)
     def list_sessions_legacy(
         response: Response,
+        request: Request,
         status: str | None = Query(default=None),
         goal_contains: str | None = Query(default=None, min_length=1),
         created_after: float | None = Query(default=None, ge=0),
@@ -623,34 +701,35 @@ def create_app() -> FastAPI:
             sort_order=sort_order,
             page=page,
             page_size=page_size,
+            tenant_id=_tenant_id(request),
         )
 
     @app.get(f"{API_V1_PREFIX}/sessions/{{session_id}}/restore")
-    def restore_session_v1(session_id: str) -> dict[str, Any]:
-        return _restore_session(session_id)
+    def restore_session_v1(session_id: str, request: Request) -> dict[str, Any]:
+        return _restore_session(session_id, tenant_id=_tenant_id(request))
 
     @app.get("/sessions/{session_id}/restore", deprecated=True)
-    def restore_session_legacy(session_id: str, response: Response) -> dict[str, Any]:
+    def restore_session_legacy(session_id: str, response: Response, request: Request) -> dict[str, Any]:
         _set_deprecation_headers(response)
-        return _restore_session(session_id)
+        return _restore_session(session_id, tenant_id=_tenant_id(request))
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/rollback")
-    def rollback_session_v1(session_id: str) -> dict[str, Any]:
-        return _rollback_session(session_id)
+    def rollback_session_v1(session_id: str, request: Request) -> dict[str, Any]:
+        return _rollback_session(session_id, tenant_id=_tenant_id(request))
 
     @app.post("/sessions/{session_id}/rollback", deprecated=True)
-    def rollback_session_legacy(session_id: str, response: Response) -> dict[str, Any]:
+    def rollback_session_legacy(session_id: str, response: Response, request: Request) -> dict[str, Any]:
         _set_deprecation_headers(response)
-        return _rollback_session(session_id)
+        return _rollback_session(session_id, tenant_id=_tenant_id(request))
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/resume")
-    def resume_session_v1(session_id: str) -> dict[str, Any]:
-        return _resume_session(session_id)
+    def resume_session_v1(session_id: str, request: Request) -> dict[str, Any]:
+        return _resume_session(session_id, tenant_id=_tenant_id(request))
 
     @app.post("/sessions/{session_id}/resume", deprecated=True)
-    def resume_session_legacy(session_id: str, response: Response) -> dict[str, Any]:
+    def resume_session_legacy(session_id: str, response: Response, request: Request) -> dict[str, Any]:
         _set_deprecation_headers(response)
-        return _resume_session(session_id)
+        return _resume_session(session_id, tenant_id=_tenant_id(request))
 
     @app.post(
         f"{API_V1_PREFIX}/decision/click",
