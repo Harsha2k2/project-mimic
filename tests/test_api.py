@@ -361,3 +361,76 @@ def test_tenant_daily_quota_returns_429(monkeypatch) -> None:
     assert second.status_code == 200
     assert third.status_code == 429
     assert third.json()["error"]["code"] == "QUOTA_EXCEEDED"
+
+
+def test_api_key_lifecycle_requires_admin_role(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "admin-key,operator-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "admin-key:admin,operator-key:operator")
+    monkeypatch.setenv("API_AUTH_TENANT_MAP", "admin-key:tenant-admin,operator-key:tenant-op")
+    client = TestClient(create_app())
+
+    denied = client.post(
+        "/api/v1/auth/keys",
+        headers={"X-API-Key": "operator-key"},
+        json={"role": "operator", "tenant_id": "tenant-op", "scopes": ["sessions:write"]},
+    )
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_api_key_lifecycle_create_rotate_revoke(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "admin-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "admin-key:admin")
+    monkeypatch.setenv("API_AUTH_TENANT_MAP", "admin-key:tenant-admin")
+    client = TestClient(create_app())
+
+    created_key = client.post(
+        "/api/v1/auth/keys",
+        headers={"X-API-Key": "admin-key"},
+        json={"role": "operator", "tenant_id": "tenant-a", "scopes": ["sessions:write"]},
+    )
+    assert created_key.status_code == 200
+    created_payload = created_key.json()
+    key_id = created_payload["key_id"]
+    generated_key = created_payload["api_key"]
+
+    using_generated = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": generated_key},
+        json={"goal": "generated-key", "max_steps": 2},
+    )
+    assert using_generated.status_code == 200
+
+    listed = client.get("/api/v1/auth/keys", headers={"X-API-Key": "admin-key"})
+    assert listed.status_code == 200
+    listed_ids = [item["key_id"] for item in listed.json()["items"]]
+    assert key_id in listed_ids
+
+    rotated = client.post(f"/api/v1/auth/keys/{key_id}/rotate", headers={"X-API-Key": "admin-key"})
+    assert rotated.status_code == 200
+    rotated_key = rotated.json()["api_key"]
+
+    old_key_denied = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": generated_key},
+        json={"goal": "old-key", "max_steps": 2},
+    )
+    assert old_key_denied.status_code == 401
+
+    new_key_allowed = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": rotated_key},
+        json={"goal": "new-key", "max_steps": 2},
+    )
+    assert new_key_allowed.status_code == 200
+
+    revoked = client.post(f"/api/v1/auth/keys/{key_id}/revoke", headers={"X-API-Key": "admin-key"})
+    assert revoked.status_code == 200
+    assert revoked.json()["revoked"] is True
+
+    revoked_denied = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": rotated_key},
+        json={"goal": "revoked", "max_steps": 2},
+    )
+    assert revoked_denied.status_code == 401

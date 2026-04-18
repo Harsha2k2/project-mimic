@@ -14,7 +14,7 @@ Execution rule for this backlog:
 2. [x] Add authorization layer with role-based permissions.
 3. [x] Add organization and tenant model with strict data isolation.
 4. [x] Add per-tenant rate limits and request quotas.
-5. [ ] Add API key lifecycle management (create, rotate, revoke, scope).
+5. [x] Add API key lifecycle management (create, rotate, revoke, scope).
 6. [ ] Add immutable audit logs for all control-plane mutations.
 7. [ ] Add audit export pipeline to SIEM destinations.
 8. [ ] Add persistent metadata store for session records.

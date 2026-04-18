@@ -178,6 +178,45 @@ class DeprecationPolicyResponse(APIPayloadModel):
     policy: str
 
 
+class APIKeyMetadata(APIPayloadModel):
+    key_id: str
+    role: str
+    tenant_id: str
+    scopes: list[str]
+    active: bool
+    created_at: float
+    last_rotated_at: float | None = None
+
+
+class APIKeyListResponse(APIPayloadModel):
+    items: list[APIKeyMetadata]
+
+
+class APIKeyCreateRequest(APIPayloadModel):
+    role: str = "operator"
+    tenant_id: str = "default"
+    scopes: list[str] = Field(default_factory=list)
+
+
+class APIKeyCreateResponse(APIPayloadModel):
+    key_id: str
+    api_key: str
+    role: str
+    tenant_id: str
+    scopes: list[str]
+
+
+class APIKeyRotateResponse(APIPayloadModel):
+    key_id: str
+    api_key: str
+    rotated_at: float
+
+
+class APIKeyRevokeResponse(APIPayloadModel):
+    key_id: str
+    revoked: bool
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -188,7 +227,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Project Mimic API", version="0.1.0")
     session_ttl_seconds = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
     scavenger_interval_seconds = int(os.getenv("SESSION_SCAVENGER_INTERVAL_SECONDS", "5"))
-    auth_keys = {item.strip() for item in os.getenv("API_AUTH_KEYS", "").split(",") if item.strip()}
+    bootstrap_auth_keys = [item.strip() for item in os.getenv("API_AUTH_KEYS", "").split(",") if item.strip()]
     role_rank = {"viewer": 1, "operator": 2, "admin": 3}
     default_role = os.getenv("API_AUTH_DEFAULT_ROLE", "operator").strip().lower()
     if default_role not in role_rank:
@@ -226,6 +265,65 @@ def create_app() -> FastAPI:
         if key and tenant:
             tenant_map[key] = tenant
 
+    scope_map: dict[str, list[str]] = {}
+    for pair in os.getenv("API_AUTH_SCOPE_MAP", "").split(","):
+        cleaned = pair.strip()
+        if not cleaned or ":" not in cleaned:
+            continue
+        key, scope_text = cleaned.split(":", 1)
+        key = key.strip()
+        scopes = [scope.strip() for scope in scope_text.split("|") if scope.strip()]
+        if key:
+            scope_map[key] = scopes
+
+    api_key_records_by_id: dict[str, dict[str, Any]] = {}
+    key_id_by_secret: dict[str, str] = {}
+
+    def _register_api_key(
+        *,
+        secret: str,
+        role: str,
+        tenant_id: str,
+        scopes: list[str],
+        key_id: str | None = None,
+    ) -> dict[str, Any]:
+        resolved_role = role.strip().lower()
+        if resolved_role not in role_rank:
+            raise ValueError("invalid role")
+        resolved_tenant = tenant_id.strip() or default_tenant
+        now = time.time()
+        resolved_key_id = key_id or f"key_{uuid4().hex[:12]}"
+        record = {
+            "key_id": resolved_key_id,
+            "role": resolved_role,
+            "tenant_id": resolved_tenant,
+            "scopes": list(scopes),
+            "active": True,
+            "created_at": now,
+            "last_rotated_at": None,
+        }
+        api_key_records_by_id[resolved_key_id] = record
+        key_id_by_secret[secret] = resolved_key_id
+        return record
+
+    for index, secret in enumerate(bootstrap_auth_keys, start=1):
+        _register_api_key(
+            secret=secret,
+            role=role_map.get(secret, default_role),
+            tenant_id=tenant_map.get(secret, default_tenant),
+            scopes=scope_map.get(secret, []),
+            key_id=f"bootstrap-{index}",
+        )
+
+    def _lookup_active_key(secret: str) -> dict[str, Any] | None:
+        key_id = key_id_by_secret.get(secret)
+        if key_id is None:
+            return None
+        record = api_key_records_by_id.get(key_id)
+        if record is None or not bool(record.get("active", False)):
+            return None
+        return record
+
     registry = SessionRegistry(ttl_seconds=session_ttl_seconds)
     api_tracer = OpenTelemetryTracer(component="api")
     orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
@@ -244,7 +342,9 @@ def create_app() -> FastAPI:
             return True
         return path.startswith("/docs") or path == "/redoc"
 
-    def _required_role_for_method(method: str) -> str:
+    def _required_role_for_request(method: str, path: str) -> str:
+        if path.startswith(f"{API_V1_PREFIX}/auth/keys") or path.startswith("/auth/keys"):
+            return "admin"
         if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
             return "operator"
         return "viewer"
@@ -451,6 +551,70 @@ def create_app() -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    def _new_api_key_secret() -> str:
+        return f"pmk_{uuid4().hex}{uuid4().hex[:8]}"
+
+    def _to_key_metadata(record: dict[str, Any]) -> APIKeyMetadata:
+        return APIKeyMetadata(
+            key_id=str(record["key_id"]),
+            role=str(record["role"]),
+            tenant_id=str(record["tenant_id"]),
+            scopes=[str(scope) for scope in list(record.get("scopes", []))],
+            active=bool(record.get("active", False)),
+            created_at=float(record["created_at"]),
+            last_rotated_at=(
+                float(record["last_rotated_at"]) if record.get("last_rotated_at") is not None else None
+            ),
+        )
+
+    def _create_api_key(payload: APIKeyCreateRequest) -> APIKeyCreateResponse:
+        api_key = _new_api_key_secret()
+        record = _register_api_key(
+            secret=api_key,
+            role=payload.role,
+            tenant_id=payload.tenant_id,
+            scopes=payload.scopes,
+        )
+        return APIKeyCreateResponse(
+            key_id=str(record["key_id"]),
+            api_key=api_key,
+            role=str(record["role"]),
+            tenant_id=str(record["tenant_id"]),
+            scopes=[str(scope) for scope in list(record.get("scopes", []))],
+        )
+
+    def _list_api_keys() -> APIKeyListResponse:
+        items = [_to_key_metadata(record) for record in api_key_records_by_id.values()]
+        items.sort(key=lambda item: item.created_at)
+        return APIKeyListResponse(items=items)
+
+    def _rotate_api_key(key_id: str) -> APIKeyRotateResponse:
+        record = api_key_records_by_id.get(key_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="api key not found")
+
+        current_secrets = [secret for secret, candidate in key_id_by_secret.items() if candidate == key_id]
+        for secret in current_secrets:
+            key_id_by_secret.pop(secret, None)
+
+        new_secret = _new_api_key_secret()
+        key_id_by_secret[new_secret] = key_id
+        rotated_at = time.time()
+        record["last_rotated_at"] = rotated_at
+        record["active"] = True
+        return APIKeyRotateResponse(key_id=key_id, api_key=new_secret, rotated_at=rotated_at)
+
+    def _revoke_api_key(key_id: str) -> APIKeyRevokeResponse:
+        record = api_key_records_by_id.get(key_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="api key not found")
+
+        record["active"] = False
+        current_secrets = [secret for secret, candidate in key_id_by_secret.items() if candidate == key_id]
+        for secret in current_secrets:
+            key_id_by_secret.pop(secret, None)
+        return APIKeyRevokeResponse(key_id=key_id, revoked=True)
+
     def _decide_click(payload: DecideRequest) -> DecideResponse:
         entities = [
             UIEntity(
@@ -502,9 +666,10 @@ def create_app() -> FastAPI:
         request_id = request.headers.get("x-request-id") or str(uuid4())
         request.state.request_id = request_id
 
-        if auth_keys and not _is_auth_exempt_path(request.url.path):
+        if key_id_by_secret and not _is_auth_exempt_path(request.url.path):
             provided_key = request.headers.get("x-api-key", "")
-            if provided_key not in auth_keys:
+            key_record = _lookup_active_key(provided_key)
+            if key_record is None:
                 unauthorized_response = _error_response(
                     request,
                     status_code=401,
@@ -516,8 +681,8 @@ def create_app() -> FastAPI:
                 unauthorized_response.headers["X-Correlation-ID"] = request_id
                 return unauthorized_response
 
-            caller_role = role_map.get(provided_key, default_role)
-            required_role = _required_role_for_method(request.method)
+            caller_role = str(key_record["role"])
+            required_role = _required_role_for_request(request.method, request.url.path)
             if role_rank[caller_role] < role_rank[required_role]:
                 forbidden_response = _error_response(
                     request,
@@ -529,7 +694,7 @@ def create_app() -> FastAPI:
                 forbidden_response.headers["X-Correlation-ID"] = request_id
                 return forbidden_response
 
-            mapped_tenant = tenant_map.get(provided_key)
+            mapped_tenant = str(key_record["tenant_id"])
             header_tenant = request.headers.get("x-tenant-id", "").strip()
             if mapped_tenant and header_tenant and mapped_tenant != header_tenant:
                 tenant_conflict = _error_response(
@@ -554,6 +719,8 @@ def create_app() -> FastAPI:
                 tenant_missing.headers["X-Correlation-ID"] = request_id
                 return tenant_missing
 
+            request.state.api_key_id = str(key_record["key_id"])
+            request.state.api_scopes = list(key_record.get("scopes", []))
             request.state.tenant_id = resolved_tenant
         else:
             request.state.tenant_id = request.headers.get("x-tenant-id", "").strip() or default_tenant
@@ -799,6 +966,42 @@ def create_app() -> FastAPI:
     def resume_session_legacy(session_id: str, response: Response, request: Request) -> dict[str, Any]:
         _set_deprecation_headers(response)
         return _resume_session(session_id, tenant_id=_tenant_id(request))
+
+    @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
+    def list_api_keys_v1() -> APIKeyListResponse:
+        return _list_api_keys()
+
+    @app.get("/auth/keys", response_model=APIKeyListResponse, deprecated=True)
+    def list_api_keys_legacy(response: Response) -> APIKeyListResponse:
+        _set_deprecation_headers(response)
+        return _list_api_keys()
+
+    @app.post(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyCreateResponse)
+    def create_api_key_v1(payload: APIKeyCreateRequest) -> APIKeyCreateResponse:
+        return _create_api_key(payload)
+
+    @app.post("/auth/keys", response_model=APIKeyCreateResponse, deprecated=True)
+    def create_api_key_legacy(payload: APIKeyCreateRequest, response: Response) -> APIKeyCreateResponse:
+        _set_deprecation_headers(response)
+        return _create_api_key(payload)
+
+    @app.post(f"{API_V1_PREFIX}/auth/keys/{{key_id}}/rotate", response_model=APIKeyRotateResponse)
+    def rotate_api_key_v1(key_id: str) -> APIKeyRotateResponse:
+        return _rotate_api_key(key_id)
+
+    @app.post("/auth/keys/{key_id}/rotate", response_model=APIKeyRotateResponse, deprecated=True)
+    def rotate_api_key_legacy(key_id: str, response: Response) -> APIKeyRotateResponse:
+        _set_deprecation_headers(response)
+        return _rotate_api_key(key_id)
+
+    @app.post(f"{API_V1_PREFIX}/auth/keys/{{key_id}}/revoke", response_model=APIKeyRevokeResponse)
+    def revoke_api_key_v1(key_id: str) -> APIKeyRevokeResponse:
+        return _revoke_api_key(key_id)
+
+    @app.post("/auth/keys/{key_id}/revoke", response_model=APIKeyRevokeResponse, deprecated=True)
+    def revoke_api_key_legacy(key_id: str, response: Response) -> APIKeyRevokeResponse:
+        _set_deprecation_headers(response)
+        return _revoke_api_key(key_id)
 
     @app.post(
         f"{API_V1_PREFIX}/decision/click",
