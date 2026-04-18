@@ -1,0 +1,25 @@
+name: Feature Request
+description: Propose a new capability or enhancement
+title: "feat: "
+labels: ["type:feature", "triage:needs-review"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem Statement
+      description: What user or system problem does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed Solution
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance Criteria
+      description: Provide measurable completion criteria.
+    validations:
+      required: true

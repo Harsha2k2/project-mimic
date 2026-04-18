@@ -1,0 +1,42 @@
+- name: type:bug
+  color: "d73a4a"
+  description: Defect or regression
+- name: type:feature
+  color: "0e8a16"
+  description: New functionality
+- name: type:incident
+  color: "b60205"
+  description: Production or staging incident
+- name: type:chore
+  color: "fef2c0"
+  description: Maintenance task
+- name: triage:needs-review
+  color: "fbca04"
+  description: Awaiting triage
+- name: triage:ready
+  color: "0e8a16"
+  description: Ready for implementation
+- name: priority:p0
+  color: "b60205"
+  description: Highest urgency
+- name: priority:p1
+  color: "d93f0b"
+  description: High urgency
+- name: priority:p2
+  color: "fbca04"
+  description: Medium urgency
+- name: priority:p3
+  color: "c2e0c6"
+  description: Low urgency
+- name: release-note:major
+  color: "5319e7"
+  description: Breaking or major release note
+- name: release-note:minor
+  color: "1d76db"
+  description: Feature-level release note
+- name: release-note:patch
+  color: "0e8a16"
+  description: Fix-level release note
+- name: release-note:none
+  color: "ededed"
+  description: No release note needed

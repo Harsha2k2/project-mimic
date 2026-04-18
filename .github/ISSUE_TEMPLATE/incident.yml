@@ -1,0 +1,31 @@
+name: Incident Report
+description: Report production or staging incident
+title: "incident: "
+labels: ["type:incident", "priority:p0", "triage:needs-review"]
+body:
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact
+      description: Describe user/system impact and severity.
+    validations:
+      required: true
+  - type: textarea
+    id: timeline
+    attributes:
+      label: Timeline
+      description: Provide detection, mitigation, and recovery timestamps.
+    validations:
+      required: true
+  - type: textarea
+    id: root_cause
+    attributes:
+      label: Suspected Root Cause
+    validations:
+      required: false
+  - type: textarea
+    id: follow_ups
+    attributes:
+      label: Follow-up Actions
+    validations:
+      required: true

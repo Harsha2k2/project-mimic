@@ -1,0 +1,20 @@
+# Default owner
+* @Harsha2k2
+
+# API and orchestration
+/src/project_mimic/api.py @Harsha2k2
+/src/project_mimic/orchestrator/ @Harsha2k2
+
+# Vision and inference
+/src/project_mimic/vision/ @Harsha2k2
+/proto/vision/ @Harsha2k2
+
+# Mimetic rust module
+/rust/mimetic/ @Harsha2k2
+
+# Deployment and CI
+/deploy/ @Harsha2k2
+/.github/workflows/ @Harsha2k2
+
+# Documentation
+/docs/ @Harsha2k2
