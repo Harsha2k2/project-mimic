@@ -60,11 +60,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 08: gRPC Runtime Implementation
 
-36. [ ] Implement SessionService server handlers from proto.
-37. [ ] Implement VisionService server handlers from proto.
-38. [ ] Implement MimeticService server handlers from proto.
-39. [ ] Implement OrchestratorService server handlers from proto.
-40. [ ] Add gRPC contract tests for request and response shapes.
+36. [x] Implement SessionService server handlers from proto.
+37. [x] Implement VisionService server handlers from proto.
+38. [x] Implement MimeticService server handlers from proto.
+39. [x] Implement OrchestratorService server handlers from proto.
+40. [x] Add gRPC contract tests for request and response shapes.
 
 ## Feature 09: Queue and Worker Orchestration
 
