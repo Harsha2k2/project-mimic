@@ -12,6 +12,7 @@ from .identity import (
 )
 from .models import ActionType, Observation, Reward, UIAction
 from .observability import InMemoryMetrics
+from .policy import PolicyContext, PolicyDecision, PolicyEngine
 from .tasks import TaskDefinition, TaskDifficulty, TaskEvidence, grade_task, task_catalog
 
 __all__ = [
@@ -24,6 +25,9 @@ __all__ = [
     "InMemoryMetrics",
     "ProjectMimicEnv",
     "ProxyEndpoint",
+    "PolicyContext",
+    "PolicyDecision",
+    "PolicyEngine",
     "RiskSignals",
     "Reward",
     "TaskDefinition",
