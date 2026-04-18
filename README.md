@@ -32,3 +32,10 @@ python inference.py
 ## Deployment Manifests
 
 - `deploy/k8s/` contains namespace, control plane, browser worker, Triton GPU, and KEDA scaler manifests.
+
+## Container Run
+
+```bash
+docker build -t project-mimic:local .
+docker run --rm -p 8000:8000 project-mimic:local
+```
