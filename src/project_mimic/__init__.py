@@ -12,6 +12,18 @@ from .identity import (
     should_rotate_identity,
 )
 from .models import ActionType, ErrorCode, Observation, ProjectMimicModel, Reward, UIAction
+from .mimetic import (
+    JitterProfile,
+    MimeticEvent,
+    MimeticEventStream,
+    MovementProfile,
+    RustPythonEventBridge,
+    TypoCorrectionStrategy,
+    jitter_profile_for_device,
+    movement_profile_for_viewport,
+    plan_pointer_stream,
+    synthesize_typing_stream,
+)
 from .observability import InMemoryMetrics
 from .policy import PolicyContext, PolicyDecision, PolicyEngine
 from .session_lifecycle import (
@@ -33,6 +45,10 @@ __all__ = [
     "IdentityAllocator",
     "IdentityBundle",
     "Observation",
+    "JitterProfile",
+    "MimeticEvent",
+    "MimeticEventStream",
+    "MovementProfile",
     "InMemoryMetrics",
     "InMemoryCheckpointStore",
     "InvalidSessionTransitionError",
@@ -45,16 +61,22 @@ __all__ = [
     "RiskSignals",
     "RedisCheckpointStore",
     "Reward",
+    "RustPythonEventBridge",
     "SessionExpiredError",
     "SessionRegistry",
     "SessionStatus",
     "TaskDefinition",
     "TaskDifficulty",
     "TaskEvidence",
+    "TypoCorrectionStrategy",
     "UIAction",
     "calculate_risk_score",
     "grade_task",
+    "jitter_profile_for_device",
     "map_exception_to_error",
+    "movement_profile_for_viewport",
+    "plan_pointer_stream",
     "should_rotate_identity",
+    "synthesize_typing_stream",
     "task_catalog",
 ]

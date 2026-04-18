@@ -44,11 +44,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 06: Mimetic Layer and Rust Bridge
 
-26. [ ] Define Rust to Python bridge contract for event stream.
-27. [ ] Add jitter profiles for desktop and mobile behavior sets.
-28. [ ] Add typo and correction strategy with bounded probabilities.
-29. [ ] Add movement profile presets tuned by viewport size.
-30. [ ] Add integration tests for deterministic replay mode.
+26. [x] Define Rust to Python bridge contract for event stream.
+27. [x] Add jitter profiles for desktop and mobile behavior sets.
+28. [x] Add typo and correction strategy with bounded probabilities.
+29. [x] Add movement profile presets tuned by viewport size.
+30. [x] Add integration tests for deterministic replay mode.
 
 ## Feature 07: API Surface Maturity
 

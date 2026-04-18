@@ -12,13 +12,31 @@ message PlanPointerRequest {
   int32 target_y = 5;
 }
 
+message MimeticEvent {
+  uint32 t_ms = 1;
+  string event_type = 2;
+  optional double x = 3;
+  optional double y = 4;
+  optional string key = 5;
+}
+
+message EventStreamContract {
+  string schema_version = 1;
+  string channel = 2;
+  string profile = 3;
+  optional int32 deterministic_seed = 4;
+  repeated MimeticEvent events = 5;
+}
+
 message PlanPointerResponse {
   repeated string events_json = 1;
+  EventStreamContract event_stream = 2;
 }
 
 message EmitPointerRequest {
   projectmimic.common.v1.RequestMeta meta = 1;
   repeated string events_json = 2;
+  EventStreamContract event_stream = 3;
 }
 
 message PlanKeystrokesRequest {
@@ -29,11 +47,13 @@ message PlanKeystrokesRequest {
 
 message PlanKeystrokesResponse {
   repeated string events_json = 1;
+  EventStreamContract event_stream = 2;
 }
 
 message EmitKeystrokesRequest {
   projectmimic.common.v1.RequestMeta meta = 1;
   repeated string events_json = 2;
+  EventStreamContract event_stream = 3;
 }
 
 service MimeticService {

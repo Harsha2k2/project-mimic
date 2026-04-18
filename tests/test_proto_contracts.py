@@ -27,6 +27,8 @@ def test_mimetic_proto_contains_service_and_rpcs() -> None:
     assert "rpc EmitPointer" in text
     assert "rpc PlanKeystrokes" in text
     assert "rpc EmitKeystrokes" in text
+    assert "message EventStreamContract" in text
+    assert "message MimeticEvent" in text
 
 
 def test_orchestrator_proto_contains_service_and_rpcs() -> None:
