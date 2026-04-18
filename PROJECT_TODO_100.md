@@ -28,11 +28,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 04: Decision Orchestrator Expansion
 
-16. [ ] Add pluggable strategy interface for site-specific policies.
-17. [ ] Implement retry budget manager with per-state caps.
-18. [ ] Add confidence calibration layer before action selection.
-19. [ ] Add fallback branch selection scoring and tie-break rules.
-20. [ ] Add orchestrator replay log for step-by-step debugging.
+16. [x] Add pluggable strategy interface for site-specific policies.
+17. [x] Implement retry budget manager with per-state caps.
+18. [x] Add confidence calibration layer before action selection.
+19. [x] Add fallback branch selection scoring and tie-break rules.
+20. [x] Add orchestrator replay log for step-by-step debugging.
 
 ## Feature 05: Vision Pipeline Robustness
 
