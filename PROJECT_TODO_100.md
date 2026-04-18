@@ -116,11 +116,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 15: Kubernetes and Scaling
 
-71. [ ] Add Helm chart skeleton for all runtime components.
-72. [ ] Add HPA and KEDA parameter overrides by environment.
-73. [ ] Add GPU node affinity profiles for Triton workloads.
-74. [ ] Add pod disruption budgets for critical services.
-75. [ ] Add manifest tests for env-specific overlay rendering.
+71. [x] Add Helm chart skeleton for all runtime components.
+72. [x] Add HPA and KEDA parameter overrides by environment.
+73. [x] Add GPU node affinity profiles for Triton workloads.
+74. [x] Add pod disruption budgets for critical services.
+75. [x] Add manifest tests for env-specific overlay rendering.
 
 ## Feature 16: Testing Infrastructure Expansion
 

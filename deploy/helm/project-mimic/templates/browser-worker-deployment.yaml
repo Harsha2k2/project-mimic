@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimic-browser-worker
+  namespace: {{ include "project-mimic.namespace" . }}
+  labels:
+{{ include "project-mimic.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.browserWorker.replicas }}
+  selector:
+    matchLabels:
+      app: mimic-browser-worker
+  template:
+    metadata:
+      labels:
+        app: mimic-browser-worker
+    spec:
+      containers:
+        - name: worker
+          image: {{ .Values.browserWorker.image }}
+        - name: mimetic-sidecar
+          image: {{ .Values.browserWorker.sidecarImage }}

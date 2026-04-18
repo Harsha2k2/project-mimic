@@ -1,6 +1,7 @@
 """Project Mimic package entrypoint."""
 
 from .environment import ProjectMimicEnv
+from .deploy_overlays import deep_merge, load_yaml_dict, render_overlay
 from .engine import ClickDecision, ExecutionEngine
 from .error_mapping import ErrorEnvelope, map_exception_to_error
 from .identity import (
@@ -106,6 +107,7 @@ __all__ = [
     "CloseSessionResponse",
     "CreateSessionRequest",
     "CreateSessionResponse",
+    "deep_merge",
     "EmitKeystrokesRequest",
     "EmitPointerRequest",
     "ErrorCode",
@@ -192,8 +194,10 @@ __all__ = [
     "plan_pointer_stream",
     "redact_sensitive_structure",
     "redact_sensitive_text",
+    "render_overlay",
     "should_rotate_identity",
     "synthesize_typing_stream",
     "task_catalog",
+    "load_yaml_dict",
     "retry_with_backoff",
 ]

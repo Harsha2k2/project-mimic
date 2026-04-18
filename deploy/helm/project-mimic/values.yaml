@@ -1,0 +1,59 @@
+global:
+  namespace: project-mimic
+
+controlPlane:
+  image: ghcr.io/harsha2k2/project-mimic-api:latest
+  replicas: 2
+
+browserWorker:
+  image: ghcr.io/harsha2k2/project-mimic-worker:latest
+  sidecarImage: ghcr.io/harsha2k2/project-mimic-mimetic:latest
+  replicas: 4
+
+triton:
+  image: nvcr.io/nvidia/tritonserver:24.07-py3
+  replicas: 2
+  gpuProfile: on-demand
+  affinityProfiles:
+    on-demand:
+      nodeAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+          nodeSelectorTerms:
+            - matchExpressions:
+                - key: workload
+                  operator: In
+                  values: ["gpu"]
+                - key: gpu-profile
+                  operator: In
+                  values: ["on-demand"]
+    spot:
+      nodeAffinity:
+        preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            preference:
+              matchExpressions:
+                - key: gpu-profile
+                  operator: In
+                  values: ["spot"]
+
+scaling:
+  hpa:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 20
+    cpuUtilization: 75
+  keda:
+    browserWorker:
+      minReplicaCount: 2
+      maxReplicaCount: 50
+      threshold: 20
+    triton:
+      minReplicaCount: 1
+      maxReplicaCount: 20
+      threshold: 10
+
+pdb:
+  controlPlane:
+    minAvailable: 1
+  triton:
+    minAvailable: 1

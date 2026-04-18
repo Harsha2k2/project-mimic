@@ -13,6 +13,23 @@ spec:
       labels:
         app: mimic-triton
     spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: workload
+                    operator: In
+                    values:
+                      - gpu
+                  - key: gpu-profile
+                    operator: In
+                    values:
+                      - on-demand
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
       nodeSelector:
         workload: gpu
       containers:

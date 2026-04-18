@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimic-control-plane
+  namespace: {{ include "project-mimic.namespace" . }}
+  labels:
+{{ include "project-mimic.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.controlPlane.replicas }}
+  selector:
+    matchLabels:
+      app: mimic-control-plane
+  template:
+    metadata:
+      labels:
+        app: mimic-control-plane
+    spec:
+      containers:
+        - name: api
+          image: {{ .Values.controlPlane.image }}
+          ports:
+            - containerPort: 8000

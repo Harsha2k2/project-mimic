@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimic-triton
+  namespace: {{ include "project-mimic.namespace" . }}
+  labels:
+{{ include "project-mimic.labels" . | indent 4 }}
+spec:
+  replicas: {{ .Values.triton.replicas }}
+  selector:
+    matchLabels:
+      app: mimic-triton
+  template:
+    metadata:
+      labels:
+        app: mimic-triton
+    spec:
+      affinity:
+{{ toYaml (index .Values.triton.affinityProfiles .Values.triton.gpuProfile) | indent 8 }}
+      containers:
+        - name: triton
+          image: {{ .Values.triton.image }}
+          resources:
+            limits:
+              nvidia.com/gpu: "1"
+            requests:
+              nvidia.com/gpu: "1"

@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mimic-control-plane-pdb
+  namespace: project-mimic
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: mimic-control-plane
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mimic-triton-pdb
+  namespace: project-mimic
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: mimic-triton

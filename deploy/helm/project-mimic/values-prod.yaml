@@ -1,0 +1,30 @@
+controlPlane:
+  replicas: 4
+
+browserWorker:
+  replicas: 12
+
+triton:
+  replicas: 4
+  gpuProfile: on-demand
+
+scaling:
+  hpa:
+    minReplicas: 4
+    maxReplicas: 60
+    cpuUtilization: 70
+  keda:
+    browserWorker:
+      minReplicaCount: 8
+      maxReplicaCount: 120
+      threshold: 40
+    triton:
+      minReplicaCount: 2
+      maxReplicaCount: 30
+      threshold: 15
+
+pdb:
+  controlPlane:
+    minAvailable: 2
+  triton:
+    minAvailable: 2

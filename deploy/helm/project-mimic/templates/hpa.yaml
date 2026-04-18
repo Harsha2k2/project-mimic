@@ -1,0 +1,21 @@
+{{- if .Values.scaling.hpa.enabled }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mimic-control-plane
+  namespace: {{ include "project-mimic.namespace" . }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mimic-control-plane
+  minReplicas: {{ .Values.scaling.hpa.minReplicas }}
+  maxReplicas: {{ .Values.scaling.hpa.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.scaling.hpa.cpuUtilization }}
+{{- end }}

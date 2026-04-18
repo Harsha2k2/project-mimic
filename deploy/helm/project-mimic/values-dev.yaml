@@ -1,0 +1,24 @@
+controlPlane:
+  replicas: 1
+
+browserWorker:
+  replicas: 2
+
+triton:
+  replicas: 1
+  gpuProfile: spot
+
+scaling:
+  hpa:
+    minReplicas: 1
+    maxReplicas: 6
+    cpuUtilization: 65
+  keda:
+    browserWorker:
+      minReplicaCount: 1
+      maxReplicaCount: 8
+      threshold: 8
+    triton:
+      minReplicaCount: 1
+      maxReplicaCount: 4
+      threshold: 4

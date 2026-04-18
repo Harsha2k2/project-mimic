@@ -1,0 +1,6 @@
+apiVersion: v2
+name: project-mimic
+description: Helm chart skeleton for Project Mimic runtime components
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
