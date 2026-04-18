@@ -1,0 +1,53 @@
+# Project Mimic Design Docs
+
+This folder contains the end-to-end system design package for Project Mimic Stage 1 (High-Fidelity Simulation).
+
+## Scope
+
+- Build a distributed, vision-based browser execution engine.
+- Replace selector-first automation with visual-spatial reasoning.
+- Support large-scale concurrent execution (100k+ sessions) using Kubernetes.
+
+## Documentation Map
+
+- HLD
+  - `hld/01-system-overview.md`
+  - `hld/02-goal-to-click-dataflow.md`
+- LLD
+  - `lld/01-decision-orchestrator.md`
+  - `lld/02-mimetic-interaction-layer.md`
+  - `lld/03-visual-spatial-brain.md`
+  - `lld/04-grpc-service-contracts.md`
+- Ops and Scale
+  - `ops/01-kubernetes-gpu-scaling.md`
+  - `ops/02-proxy-fingerprinting-strategy.md`
+  - `ops/03-observability-security.md`
+- Stack
+  - `TECH_STACK.md`
+- Architecture Diagrams (one-by-one)
+  - `diagrams/README.md`
+  - `diagrams/01-system-architecture.md`
+  - `diagrams/02-control-plane-architecture.md`
+  - `diagrams/03-simulation-plane-architecture.md`
+  - `diagrams/04-goal-to-click-sequence.md`
+  - `diagrams/05-decision-orchestrator-architecture.md`
+  - `diagrams/06-kubernetes-deployment-architecture.md`
+  - `diagrams/07-session-identity-proxy-architecture.md`
+
+## Stage 1 Outcomes
+
+- High-fidelity browser simulation with full web stack rendering.
+- Vision-to-Action loop with coordinate and DOM grounding.
+- Human-like mimetic interaction layer for pointer and keyboard synthesis.
+- Hybrid Behavior Tree and State Machine decisioning for multi-step tasks.
+
+## Constraints and Assumptions
+
+- Performance-critical interaction components are implemented in Rust.
+- High-level agent logic and orchestration are implemented in Python/Node.js.
+- Internal services communicate through gRPC over mTLS.
+- Cloud target is AWS or GCP with Kubernetes.
+
+## Compliance Note
+
+This design is intended for lawful automation, QA, and user emulation research in environments where you have authorization to operate.
