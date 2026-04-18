@@ -6,6 +6,15 @@ on:
   pull_request:
 
 jobs:
+  docs-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate docs package
+        run: python tools/docs/validate_docs.py
+
   python-tests:
     runs-on: ubuntu-latest
     steps:

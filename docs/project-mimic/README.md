@@ -19,10 +19,17 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/03-visual-spatial-brain.md`
   - `lld/04-grpc-service-contracts.md`
   - `lld/05-model-migrations-and-errors.md`
+  - `lld/06-orchestrator-internals.md`
+  - `lld/07-vision-internals.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
   - `ops/03-observability-security.md`
+  - `ops/04-contributor-quickstart.md`
+  - `ops/05-troubleshooting.md`
+- ADR
+  - `adr/README.md`
+  - `adr/TEMPLATE.md`
 - Stack
   - `TECH_STACK.md`
 - Architecture Diagrams (one-by-one)

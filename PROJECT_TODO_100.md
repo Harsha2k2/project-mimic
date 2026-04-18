@@ -148,11 +148,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 19: Developer Experience and Documentation
 
-91. [ ] Add architecture decision record template and index.
-92. [ ] Add contributor quickstart with local runbook.
-93. [ ] Add troubleshooting guide for common failure modes.
-94. [ ] Add module-level docs for orchestrator and vision internals.
-95. [ ] Add docs validation checks in CI workflow.
+91. [x] Add architecture decision record template and index.
+92. [x] Add contributor quickstart with local runbook.
+93. [x] Add troubleshooting guide for common failure modes.
+94. [x] Add module-level docs for orchestrator and vision internals.
+95. [x] Add docs validation checks in CI workflow.
 
 ## Feature 20: Release and Production Readiness
 
