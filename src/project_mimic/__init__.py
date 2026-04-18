@@ -14,6 +14,14 @@ from .identity import (
 from .models import ActionType, ErrorCode, Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics
 from .policy import PolicyContext, PolicyDecision, PolicyEngine
+from .session_lifecycle import (
+    InMemoryCheckpointStore,
+    InvalidSessionTransitionError,
+    RedisCheckpointStore,
+    SessionExpiredError,
+    SessionRegistry,
+    SessionStatus,
+)
 from .tasks import TaskDefinition, TaskDifficulty, TaskEvidence, grade_task, task_catalog
 
 __all__ = [
@@ -26,6 +34,8 @@ __all__ = [
     "IdentityBundle",
     "Observation",
     "InMemoryMetrics",
+    "InMemoryCheckpointStore",
+    "InvalidSessionTransitionError",
     "ProjectMimicEnv",
     "ProxyEndpoint",
     "PolicyContext",
@@ -33,7 +43,11 @@ __all__ = [
     "PolicyEngine",
     "ProjectMimicModel",
     "RiskSignals",
+    "RedisCheckpointStore",
     "Reward",
+    "SessionExpiredError",
+    "SessionRegistry",
+    "SessionStatus",
     "TaskDefinition",
     "TaskDifficulty",
     "TaskEvidence",

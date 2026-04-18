@@ -132,3 +132,27 @@ def test_metrics_endpoint_tracks_requests() -> None:
     assert "/sessions" in payload["requests"]
     assert payload["requests"]["/sessions"] >= 1
     assert "200" in payload["status_codes"]
+
+
+def test_restore_endpoint_returns_checkpoint_payload() -> None:
+    client = TestClient(create_app())
+    created = client.post("/sessions", json={"goal": "restore-check", "max_steps": 3})
+    assert created.status_code == 200
+    session_id = created.json()["session_id"]
+
+    client.post(f"/sessions/{session_id}/step", json={"action_type": "click", "target": "search"})
+    restored = client.get(f"/sessions/{session_id}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["state"]["step_index"] >= 0
+
+
+def test_list_sessions_endpoint_returns_paged_result() -> None:
+    client = TestClient(create_app())
+    client.post("/sessions", json={"goal": "list-check", "max_steps": 3})
+
+    response = client.get("/sessions?page=1&page_size=10")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["page"] == 1
+    assert payload["page_size"] == 10
+    assert payload["total"] >= 1

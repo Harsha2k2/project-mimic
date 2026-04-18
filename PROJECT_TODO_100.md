@@ -20,11 +20,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 03: Session Lifecycle and State Durability
 
-11. [ ] Add session expiration policy with configurable TTL.
-12. [ ] Persist session checkpoints in Redis for crash recovery.
-13. [ ] Add explicit session status transitions and guard rules.
-14. [ ] Add stale session scavenger background task.
-15. [ ] Add tests for reset, restore, and session expiry behavior.
+11. [x] Add session expiration policy with configurable TTL.
+12. [x] Persist session checkpoints in Redis for crash recovery.
+13. [x] Add explicit session status transitions and guard rules.
+14. [x] Add stale session scavenger background task.
+15. [x] Add tests for reset, restore, and session expiry behavior.
 
 ## Feature 04: Decision Orchestrator Expansion
 

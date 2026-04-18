@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from threading import Lock
+import os
+from threading import Event, Thread
 import time
 from typing import Any
-from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi import Request
@@ -14,9 +14,14 @@ from pydantic import Field
 
 from .error_mapping import map_exception_to_error
 from .engine import ExecutionEngine
-from .environment import ProjectMimicEnv
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics
+from .session_lifecycle import (
+    InvalidSessionTransitionError,
+    SessionExpiredError,
+    SessionRegistry,
+    SessionStatus,
+)
 from .vision.grounding import BBox, DOMNode, UIEntity
 
 
@@ -43,6 +48,13 @@ class StepResponse(APIPayloadModel):
     reward: Reward
     done: bool
     info: dict[str, Any]
+
+
+class SessionListResponse(APIPayloadModel):
+    items: list[dict[str, Any]]
+    page: int
+    page_size: int
+    total: int
 
 
 class BBoxPayload(APIPayloadModel):
@@ -85,33 +97,16 @@ class DecideResponse(APIPayloadModel):
     score: float | None = None
 
 
-class SessionRegistry:
-    def __init__(self) -> None:
-        self._sessions: dict[str, ProjectMimicEnv] = {}
-        self._lock = Lock()
-
-    def create(self, goal: str, max_steps: int) -> tuple[str, Observation]:
-        session_id = str(uuid4())
-        env = ProjectMimicEnv(goal=goal, max_steps=max_steps)
-        observation = env.reset()
-
-        with self._lock:
-            self._sessions[session_id] = env
-
-        return session_id, observation
-
-    def get(self, session_id: str) -> ProjectMimicEnv:
-        env = self._sessions.get(session_id)
-        if env is None:
-            raise KeyError(session_id)
-        return env
-
-
 def create_app() -> FastAPI:
     app = FastAPI(title="Project Mimic API", version="0.1.0")
-    registry = SessionRegistry()
+    session_ttl_seconds = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
+    scavenger_interval_seconds = int(os.getenv("SESSION_SCAVENGER_INTERVAL_SECONDS", "5"))
+
+    registry = SessionRegistry(ttl_seconds=session_ttl_seconds)
     engine = ExecutionEngine()
     metrics = InMemoryMetrics()
+    scavenger_stop = Event()
+    scavenger_thread: Thread | None = None
 
     @app.middleware("http")
     async def metrics_middleware(request: Request, call_next):
@@ -126,6 +121,22 @@ def create_app() -> FastAPI:
         envelope = map_exception_to_error(exc)
         return JSONResponse(status_code=422, content={"error": envelope.__dict__})
 
+    @app.on_event("startup")
+    def startup_scavenger() -> None:
+        def _loop() -> None:
+            while not scavenger_stop.wait(scavenger_interval_seconds):
+                registry.scavenge_expired()
+
+        nonlocal scavenger_thread
+        scavenger_thread = Thread(target=_loop, daemon=True, name="session-scavenger")
+        scavenger_thread.start()
+
+    @app.on_event("shutdown")
+    def shutdown_scavenger() -> None:
+        scavenger_stop.set()
+        if scavenger_thread and scavenger_thread.is_alive():
+            scavenger_thread.join(timeout=1.0)
+
     @app.post("/sessions", response_model=SessionCreatedResponse)
     def create_session(payload: CreateSessionRequest) -> SessionCreatedResponse:
         session_id, observation = registry.create(goal=payload.goal, max_steps=payload.max_steps)
@@ -134,22 +145,31 @@ def create_app() -> FastAPI:
     @app.post("/sessions/{session_id}/reset", response_model=Observation)
     def reset_session(session_id: str, payload: ResetSessionRequest) -> Observation:
         try:
-            env = registry.get(session_id)
+            return registry.reset(session_id=session_id, goal=payload.goal)
+        except SessionExpiredError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
+        except InvalidSessionTransitionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
-
-        return env.reset(goal=payload.goal)
 
     @app.post("/sessions/{session_id}/step", response_model=StepResponse)
     def step_session(session_id: str, action: UIAction) -> StepResponse:
         try:
             env = registry.get(session_id)
+        except SessionExpiredError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
 
         try:
             observation, reward, done, info = env.step(action)
+            if done:
+                registry.mark_completed(session_id)
+            else:
+                registry.save_checkpoint(session_id)
         except RuntimeError as exc:
+            registry.mark_failed(session_id)
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
         return StepResponse(observation=observation, reward=reward, done=done, info=info)
@@ -158,10 +178,29 @@ def create_app() -> FastAPI:
     def state_session(session_id: str) -> dict[str, Any]:
         try:
             env = registry.get(session_id)
+        except SessionExpiredError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="session not found") from exc
 
         return env.state()
+
+    @app.get("/sessions", response_model=SessionListResponse)
+    def list_sessions(
+        status: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> SessionListResponse:
+        filter_status = SessionStatus(status) if status else None
+        result = registry.list_sessions(status=filter_status, page=page, page_size=page_size)
+        return SessionListResponse(**result)
+
+    @app.get("/sessions/{session_id}/restore")
+    def restore_session(session_id: str) -> dict[str, Any]:
+        try:
+            return registry.restore(session_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="checkpoint not found") from exc
 
     @app.post("/decision/click", response_model=DecideResponse)
     def decide_click(payload: DecideRequest) -> DecideResponse:
