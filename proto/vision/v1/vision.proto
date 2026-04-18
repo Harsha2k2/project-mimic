@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package projectmimic.vision.v1;
+
+import "proto/common/v1/common.proto";
+
+message AnalyzeFrameRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  bytes screenshot = 2;
+  string dom_snapshot_json = 3;
+  string task_hint = 4;
+}
+
+message AnalyzeFrameResponse {
+  string frame_hash = 1;
+  repeated string entities_json = 2;
+}
+
+message GroundActionRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  string intent = 2;
+  string ui_map_json = 3;
+}
+
+message GroundActionResponse {
+  string dom_node_id = 1;
+  int32 x = 2;
+  int32 y = 3;
+  float confidence = 4;
+}
+
+service VisionService {
+  rpc AnalyzeFrame(AnalyzeFrameRequest) returns (AnalyzeFrameResponse);
+  rpc GroundAction(GroundActionRequest) returns (GroundActionResponse);
+}

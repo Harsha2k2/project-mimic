@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package projectmimic.common.v1;
+
+message RequestMeta {
+  string trace_id = 1;
+  string session_id = 2;
+  string idempotency_key = 3;
+  int64 deadline_unix_ms = 4;
+}
+
+message Ack {
+  bool ok = 1;
+  string message = 2;
+}

@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package projectmimic.session.v1;
+
+import "proto/common/v1/common.proto";
+
+message CreateSessionRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  string goal = 2;
+  int32 max_steps = 3;
+}
+
+message CreateSessionResponse {
+  string session_id = 1;
+  string status = 2;
+}
+
+message AttachSiteTaskRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  string site_id = 2;
+  string task = 3;
+}
+
+message CloseSessionRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+}
+
+message CloseSessionResponse {
+  string session_id = 1;
+  string final_status = 2;
+}
+
+service SessionService {
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc AttachSiteTask(AttachSiteTaskRequest) returns (projectmimic.common.v1.Ack);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+}

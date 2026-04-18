@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package projectmimic.mimetic.v1;
+
+import "proto/common/v1/common.proto";
+
+message PlanPointerRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  int32 start_x = 2;
+  int32 start_y = 3;
+  int32 target_x = 4;
+  int32 target_y = 5;
+}
+
+message PlanPointerResponse {
+  repeated string events_json = 1;
+}
+
+message EmitPointerRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  repeated string events_json = 2;
+}
+
+message PlanKeystrokesRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  string text = 2;
+  string field_type = 3;
+}
+
+message PlanKeystrokesResponse {
+  repeated string events_json = 1;
+}
+
+message EmitKeystrokesRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  repeated string events_json = 2;
+}
+
+service MimeticService {
+  rpc PlanPointer(PlanPointerRequest) returns (PlanPointerResponse);
+  rpc EmitPointer(EmitPointerRequest) returns (projectmimic.common.v1.Ack);
+  rpc PlanKeystrokes(PlanKeystrokesRequest) returns (PlanKeystrokesResponse);
+  rpc EmitKeystrokes(EmitKeystrokesRequest) returns (projectmimic.common.v1.Ack);
+}

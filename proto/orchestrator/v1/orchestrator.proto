@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package projectmimic.orchestrator.v1;
+
+import "proto/common/v1/common.proto";
+
+message NextStepRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  string blackboard_json = 2;
+}
+
+message NextStepResponse {
+  string action_type = 1;
+  string action_payload_json = 2;
+}
+
+message VerifyStepRequest {
+  projectmimic.common.v1.RequestMeta meta = 1;
+  string expected_outcome_json = 2;
+  string observed_outcome_json = 3;
+}
+
+message VerifyStepResponse {
+  bool success = 1;
+  string reason = 2;
+}
+
+service OrchestratorService {
+  rpc NextStep(NextStepRequest) returns (NextStepResponse);
+  rpc VerifyStep(VerifyStepRequest) returns (VerifyStepResponse);
+}
