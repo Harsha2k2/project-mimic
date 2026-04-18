@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
 from .environment import ProjectMimicEnv
@@ -46,6 +47,17 @@ class CheckpointStore(Protocol):
         ...
 
 
+class SessionMetadataStore(Protocol):
+    def save(self, session_id: str, payload: dict[str, Any]) -> None:
+        ...
+
+    def load(self, session_id: str) -> dict[str, Any] | None:
+        ...
+
+    def list_all(self) -> dict[str, dict[str, Any]]:
+        ...
+
+
 class InMemoryCheckpointStore:
     def __init__(self) -> None:
         self._store: dict[str, dict] = {}
@@ -55,6 +67,52 @@ class InMemoryCheckpointStore:
 
     def load(self, session_id: str) -> dict | None:
         return self._store.get(session_id)
+
+
+class InMemorySessionMetadataStore:
+    def __init__(self) -> None:
+        self._store: dict[str, dict[str, Any]] = {}
+
+    def save(self, session_id: str, payload: dict[str, Any]) -> None:
+        self._store[session_id] = dict(payload)
+
+    def load(self, session_id: str) -> dict[str, Any] | None:
+        payload = self._store.get(session_id)
+        return dict(payload) if payload is not None else None
+
+    def list_all(self) -> dict[str, dict[str, Any]]:
+        return {session_id: dict(payload) for session_id, payload in self._store.items()}
+
+
+class JsonFileSessionMetadataStore:
+    def __init__(self, file_path: str) -> None:
+        if not file_path.strip():
+            raise ValueError("file_path must not be empty")
+        self._path = Path(file_path)
+
+    def save(self, session_id: str, payload: dict[str, Any]) -> None:
+        all_payload = self.list_all()
+        all_payload[session_id] = dict(payload)
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(all_payload, sort_keys=True), encoding="utf-8")
+
+    def load(self, session_id: str) -> dict[str, Any] | None:
+        return self.list_all().get(session_id)
+
+    def list_all(self) -> dict[str, dict[str, Any]]:
+        if not self._path.exists():
+            return {}
+        content = self._path.read_text(encoding="utf-8").strip()
+        if not content:
+            return {}
+        loaded = json.loads(content)
+        if not isinstance(loaded, dict):
+            return {}
+        result: dict[str, dict[str, Any]] = {}
+        for session_id, payload in loaded.items():
+            if isinstance(session_id, str) and isinstance(payload, dict):
+                result[session_id] = dict(payload)
+        return result
 
 
 class RedisCheckpointStore:
@@ -104,6 +162,7 @@ class SessionRegistry:
         self,
         ttl_seconds: int = 1800,
         checkpoint_store: CheckpointStore | None = None,
+        metadata_store: SessionMetadataStore | None = None,
         now_fn=time.time,
     ) -> None:
         if ttl_seconds <= 0:
@@ -111,6 +170,7 @@ class SessionRegistry:
 
         self._ttl_seconds = ttl_seconds
         self._checkpoint_store = checkpoint_store or InMemoryCheckpointStore()
+        self._metadata_store = metadata_store or InMemorySessionMetadataStore()
         self._records: dict[str, SessionRecord] = {}
         self._now = now_fn
 
@@ -141,6 +201,7 @@ class SessionRegistry:
         self._ensure_tenant_access(record, tenant_id)
         self._ensure_not_expired(record)
         record.last_accessed_at = self._now()
+        self._persist_metadata(session_id, record)
         return record.env
 
     def get_record(self, session_id: str, tenant_id: str | None = None) -> SessionRecord:
@@ -237,31 +298,66 @@ class SessionRegistry:
             raise ValueError("sort_order must be asc or desc")
 
         items = []
-        for session_id, record in self._records.items():
-            if status is not None and record.status != status:
-                continue
-            if tenant_id is not None and record.tenant_id != tenant_id:
-                continue
+        if self._records:
+            for session_id, record in self._records.items():
+                if status is not None and record.status != status:
+                    continue
+                if tenant_id is not None and record.tenant_id != tenant_id:
+                    continue
 
-            goal = str(record.env.state().get("goal", ""))
-            if goal_contains and goal_contains.lower() not in goal.lower():
-                continue
-            if created_after is not None and record.created_at < created_after:
-                continue
-            if created_before is not None and record.created_at > created_before:
-                continue
+                goal = str(record.env.state().get("goal", ""))
+                if goal_contains and goal_contains.lower() not in goal.lower():
+                    continue
+                if created_after is not None and record.created_at < created_after:
+                    continue
+                if created_before is not None and record.created_at > created_before:
+                    continue
 
-            items.append(
-                {
-                    "session_id": session_id,
-                    "goal": goal,
-                    "status": record.status.value,
-                    "created_at": record.created_at,
-                    "last_accessed_at": record.last_accessed_at,
-                    "expires_at": record.expires_at,
-                    "tenant_id": record.tenant_id,
-                }
-            )
+                items.append(
+                    {
+                        "session_id": session_id,
+                        "goal": goal,
+                        "status": record.status.value,
+                        "created_at": record.created_at,
+                        "last_accessed_at": record.last_accessed_at,
+                        "expires_at": record.expires_at,
+                        "tenant_id": record.tenant_id,
+                    }
+                )
+        else:
+            persisted = self._metadata_store.list_all()
+            for session_id, payload in persisted.items():
+                row_status = str(payload.get("status", SessionStatus.CREATED.value))
+                if status is not None and row_status != status.value:
+                    continue
+
+                row_tenant_id = str(payload.get("tenant_id", "default"))
+                if tenant_id is not None and row_tenant_id != tenant_id:
+                    continue
+
+                goal = str(payload.get("goal", ""))
+                row_created_at = float(payload.get("created_at", 0.0))
+                row_last_accessed_at = float(payload.get("last_accessed_at", row_created_at))
+                row_expires_at = float(payload.get("expires_at", row_created_at))
+
+                if goal_contains and goal_contains.lower() not in goal.lower():
+                    continue
+                if created_after is not None and row_created_at < created_after:
+                    continue
+                if created_before is not None and row_created_at > created_before:
+                    continue
+
+                items.append(
+                    {
+                        "session_id": session_id,
+                        "goal": goal,
+                        "status": row_status,
+                        "created_at": row_created_at,
+                        "last_accessed_at": row_last_accessed_at,
+                        "expires_at": row_expires_at,
+                        "tenant_id": row_tenant_id,
+                    }
+                )
 
         reverse = sort_order == "desc"
         items.sort(key=lambda item: item[sort_by], reverse=reverse)
@@ -298,6 +394,7 @@ class SessionRegistry:
 
             if now > record.expires_at:
                 self._transition(record, SessionStatus.EXPIRED)
+                self._persist_checkpoint(self._session_id_for_record(record), record)
                 expired_count += 1
         return expired_count
 
@@ -311,6 +408,24 @@ class SessionRegistry:
             "tenant_id": record.tenant_id,
         }
         self._checkpoint_store.save(session_id, payload)
+        self._persist_metadata(session_id, record)
+
+    def _persist_metadata(self, session_id: str, record: SessionRecord) -> None:
+        metadata = {
+            "goal": str(record.env.state().get("goal", "")),
+            "status": record.status.value,
+            "created_at": record.created_at,
+            "last_accessed_at": record.last_accessed_at,
+            "expires_at": record.expires_at,
+            "tenant_id": record.tenant_id,
+        }
+        self._metadata_store.save(session_id, metadata)
+
+    def _session_id_for_record(self, target_record: SessionRecord) -> str:
+        for session_id, record in self._records.items():
+            if record is target_record:
+                return session_id
+        raise KeyError("session record not found")
 
     @staticmethod
     def _transition(record: SessionRecord, target: SessionStatus) -> None:

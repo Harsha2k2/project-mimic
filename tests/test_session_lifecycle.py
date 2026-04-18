@@ -4,8 +4,10 @@ from project_mimic.models import ActionType, UIAction
 from project_mimic.session_lifecycle import (
     InMemoryCheckpointStore,
     InvalidSessionTransitionError,
+    JsonFileSessionMetadataStore,
     SessionExpiredError,
     SessionRegistry,
+    SessionStatus,
 )
 
 
@@ -67,3 +69,31 @@ def test_rollback_and_resume_restore_checkpoint_state() -> None:
 
     resumed = registry.resume_from_checkpoint(session_id)
     assert resumed["step_index"] == 1
+
+
+def test_json_metadata_store_persists_session_listing_across_registry_restart(tmp_path) -> None:
+    metadata_file = tmp_path / "session-metadata.json"
+    metadata_store = JsonFileSessionMetadataStore(str(metadata_file))
+
+    registry = SessionRegistry(ttl_seconds=100, metadata_store=metadata_store)
+    session_id, _ = registry.create(goal="persisted-goal", max_steps=2, tenant_id="tenant-a")
+
+    listing_before = registry.list_sessions(tenant_id="tenant-a")
+    assert any(item["session_id"] == session_id for item in listing_before["items"])
+
+    reloaded_registry = SessionRegistry(ttl_seconds=100, metadata_store=metadata_store)
+    listing_after = reloaded_registry.list_sessions(tenant_id="tenant-a")
+    assert any(item["session_id"] == session_id for item in listing_after["items"])
+
+
+def test_json_metadata_store_tracks_status_transitions(tmp_path) -> None:
+    metadata_file = tmp_path / "session-metadata.json"
+    metadata_store = JsonFileSessionMetadataStore(str(metadata_file))
+
+    registry = SessionRegistry(ttl_seconds=100, metadata_store=metadata_store)
+    session_id, _ = registry.create(goal="status-goal", max_steps=1, tenant_id="tenant-a")
+    registry.mark_completed(session_id, tenant_id="tenant-a")
+
+    reloaded_registry = SessionRegistry(ttl_seconds=100, metadata_store=metadata_store)
+    listing = reloaded_registry.list_sessions(status=SessionStatus.COMPLETED, tenant_id="tenant-a")
+    assert any(item["session_id"] == session_id for item in listing["items"])

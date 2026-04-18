@@ -22,7 +22,9 @@ from .observability import InMemoryMetrics, OpenTelemetryTracer
 from .security import redact_sensitive_structure, redact_sensitive_text
 from .orchestrator.decision_orchestrator import DecisionOrchestrator
 from .session_lifecycle import (
+    InMemorySessionMetadataStore,
     InvalidSessionTransitionError,
+    JsonFileSessionMetadataStore,
     SessionAccessDeniedError,
     SessionExpiredError,
     SessionRegistry,
@@ -267,6 +269,8 @@ def create_app() -> FastAPI:
     tenant_minute_counters: dict[tuple[str, int], int] = {}
     tenant_daily_counters: dict[tuple[str, int], int] = {}
     audit_events: list[dict[str, Any]] = []
+    metadata_store_type = os.getenv("SESSION_METADATA_STORE", "memory").strip().lower()
+    metadata_store_file_path = os.getenv("SESSION_METADATA_FILE_PATH", "")
 
     role_map: dict[str, str] = {}
     for pair in os.getenv("API_AUTH_ROLE_MAP", "").split(","):
@@ -349,7 +353,14 @@ def create_app() -> FastAPI:
             return None
         return record
 
-    registry = SessionRegistry(ttl_seconds=session_ttl_seconds)
+    if metadata_store_type == "file":
+        if not metadata_store_file_path:
+            raise RuntimeError("SESSION_METADATA_FILE_PATH is required when SESSION_METADATA_STORE=file")
+        metadata_store = JsonFileSessionMetadataStore(metadata_store_file_path)
+    else:
+        metadata_store = InMemorySessionMetadataStore()
+
+    registry = SessionRegistry(ttl_seconds=session_ttl_seconds, metadata_store=metadata_store)
     api_tracer = OpenTelemetryTracer(component="api")
     orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
     audit_sink = build_audit_export_sink_from_env()

@@ -17,7 +17,7 @@ Execution rule for this backlog:
 5. [x] Add API key lifecycle management (create, rotate, revoke, scope).
 6. [x] Add immutable audit logs for all control-plane mutations.
 7. [x] Add audit export pipeline to SIEM destinations.
-8. [ ] Add persistent metadata store for session records.
+8. [x] Add persistent metadata store for session records.
 9. [ ] Add durable queue backend for worker jobs.
 10. [ ] Add persistent idempotency key store with TTL and replay protection.
 11. [ ] Add strict request size limits and timeout guards on public APIs.

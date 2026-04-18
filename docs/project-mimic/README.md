@@ -28,6 +28,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/12-api-key-lifecycle-management.md`
   - `lld/13-immutable-audit-logs.md`
   - `lld/14-audit-export-pipeline.md`
+  - `lld/15-persistent-session-metadata-store.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
