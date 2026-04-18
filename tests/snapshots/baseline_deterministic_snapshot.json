@@ -1,0 +1,47 @@
+{
+  "average_score": 0.9794444444444445,
+  "results": [
+    {
+      "task_id": "easy.search_submit",
+      "score": 1.0,
+      "source": "deterministic",
+      "evidence": {
+        "search_submitted": true,
+        "offers_extracted": 1,
+        "sites_visited": 1,
+        "constraints_satisfied": false,
+        "cheapest_selected": true,
+        "steps_used": 6,
+        "max_steps": 20
+      }
+    },
+    {
+      "task_id": "medium.compare_three_sites",
+      "score": 0.9583333333333334,
+      "source": "deterministic",
+      "evidence": {
+        "search_submitted": true,
+        "offers_extracted": 5,
+        "sites_visited": 3,
+        "constraints_satisfied": false,
+        "cheapest_selected": true,
+        "steps_used": 12,
+        "max_steps": 25
+      }
+    },
+    {
+      "task_id": "hard.layover_five_sites",
+      "score": 0.9800000000000001,
+      "source": "deterministic",
+      "evidence": {
+        "search_submitted": true,
+        "offers_extracted": 8,
+        "sites_visited": 5,
+        "constraints_satisfied": true,
+        "cheapest_selected": true,
+        "steps_used": 18,
+        "max_steps": 30
+      }
+    }
+  ]
+}

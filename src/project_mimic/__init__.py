@@ -95,6 +95,7 @@ from .session_lifecycle import (
     SessionStatus,
 )
 from .tasks import TaskDefinition, TaskDifficulty, TaskEvidence, grade_task, task_catalog
+from .testing import EphemeralIntegrationEnvironment, ephemeral_integration_environment
 
 __all__ = [
     "ActionType",
@@ -108,6 +109,7 @@ __all__ = [
     "CreateSessionRequest",
     "CreateSessionResponse",
     "deep_merge",
+    "EphemeralIntegrationEnvironment",
     "EmitKeystrokesRequest",
     "EmitPointerRequest",
     "ErrorCode",
@@ -198,6 +200,7 @@ __all__ = [
     "should_rotate_identity",
     "synthesize_typing_stream",
     "task_catalog",
+    "ephemeral_integration_environment",
     "load_yaml_dict",
     "retry_with_backoff",
 ]

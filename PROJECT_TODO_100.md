@@ -124,11 +124,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 16: Testing Infrastructure Expansion
 
-76. [ ] Add contract test suite for API and gRPC parity.
-77. [ ] Add snapshot tests for baseline output stability.
-78. [ ] Add integration environment with ephemeral services.
-79. [ ] Add mutation test pass for critical decision code.
-80. [ ] Add flaky test detection and quarantine workflow.
+76. [x] Add contract test suite for API and gRPC parity.
+77. [x] Add snapshot tests for baseline output stability.
+78. [x] Add integration environment with ephemeral services.
+79. [x] Add mutation test pass for critical decision code.
+80. [x] Add flaky test detection and quarantine workflow.
 
 ## Feature 17: Artifacts and Data Pipeline
 
