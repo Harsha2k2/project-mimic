@@ -1,0 +1,10 @@
+[package]
+name = "mimetic"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust mimetic interaction primitives for Project Mimic"
+
+[lib]
+name = "mimetic"
+path = "src/lib.rs"

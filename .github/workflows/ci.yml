@@ -24,3 +24,15 @@ jobs:
 
       - name: Run tests
         run: pytest
+
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path rust/mimetic/Cargo.toml
