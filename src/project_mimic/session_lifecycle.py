@@ -184,26 +184,48 @@ class SessionRegistry:
     def list_sessions(
         self,
         status: SessionStatus | None = None,
+        goal_contains: str | None = None,
+        created_after: float | None = None,
+        created_before: float | None = None,
+        sort_by: str = "created_at",
+        sort_order: str = "desc",
         page: int = 1,
         page_size: int = 50,
     ) -> dict:
         if page <= 0 or page_size <= 0:
             raise ValueError("page and page_size must be positive")
 
+        if sort_by not in {"created_at", "last_accessed_at", "expires_at"}:
+            raise ValueError("sort_by must be one of created_at,last_accessed_at,expires_at")
+        if sort_order not in {"asc", "desc"}:
+            raise ValueError("sort_order must be asc or desc")
+
         items = []
         for session_id, record in self._records.items():
             if status is not None and record.status != status:
                 continue
 
+            goal = str(record.env.state().get("goal", ""))
+            if goal_contains and goal_contains.lower() not in goal.lower():
+                continue
+            if created_after is not None and record.created_at < created_after:
+                continue
+            if created_before is not None and record.created_at > created_before:
+                continue
+
             items.append(
                 {
                     "session_id": session_id,
+                    "goal": goal,
                     "status": record.status.value,
                     "created_at": record.created_at,
                     "last_accessed_at": record.last_accessed_at,
                     "expires_at": record.expires_at,
                 }
             )
+
+        reverse = sort_order == "desc"
+        items.sort(key=lambda item: item[sort_by], reverse=reverse)
 
         start = (page - 1) * page_size
         end = start + page_size
@@ -213,6 +235,14 @@ class SessionRegistry:
             "page": page,
             "page_size": page_size,
             "total": len(items),
+            "sort_by": sort_by,
+            "sort_order": sort_order,
+            "filters": {
+                "status": status.value if status else None,
+                "goal_contains": goal_contains,
+                "created_after": created_after,
+                "created_before": created_before,
+            },
         }
 
     def save_checkpoint(self, session_id: str) -> None:

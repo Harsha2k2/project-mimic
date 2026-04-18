@@ -52,11 +52,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 07: API Surface Maturity
 
-31. [ ] Add API version prefix and deprecation handling policy.
-32. [ ] Add request id propagation and response correlation ids.
-33. [ ] Add structured API error contract with machine codes.
-34. [ ] Add pagination and filters for session listing endpoints.
-35. [ ] Add OpenAPI examples for critical decision endpoints.
+31. [x] Add API version prefix and deprecation handling policy.
+32. [x] Add request id propagation and response correlation ids.
+33. [x] Add structured API error contract with machine codes.
+34. [x] Add pagination and filters for session listing endpoints.
+35. [x] Add OpenAPI examples for critical decision endpoints.
 
 ## Feature 08: gRPC Runtime Implementation
 
