@@ -9,44 +9,50 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi import Request
-from pydantic import BaseModel, Field
+from fastapi.responses import JSONResponse
+from pydantic import Field
 
+from .error_mapping import map_exception_to_error
 from .engine import ExecutionEngine
 from .environment import ProjectMimicEnv
-from .models import Observation, Reward, UIAction
+from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics
 from .vision.grounding import BBox, DOMNode, UIEntity
 
 
-class CreateSessionRequest(BaseModel):
+class APIPayloadModel(ProjectMimicModel):
+    schema_version: str = "1.0"
+
+
+class CreateSessionRequest(APIPayloadModel):
     goal: str
     max_steps: int = Field(default=20, ge=1)
 
 
-class ResetSessionRequest(BaseModel):
+class ResetSessionRequest(APIPayloadModel):
     goal: str | None = None
 
 
-class SessionCreatedResponse(BaseModel):
+class SessionCreatedResponse(APIPayloadModel):
     session_id: str
     observation: Observation
 
 
-class StepResponse(BaseModel):
+class StepResponse(APIPayloadModel):
     observation: Observation
     reward: Reward
     done: bool
     info: dict[str, Any]
 
 
-class BBoxPayload(BaseModel):
+class BBoxPayload(APIPayloadModel):
     x: int
     y: int
     width: int
     height: int
 
 
-class UIEntityPayload(BaseModel):
+class UIEntityPayload(APIPayloadModel):
     entity_id: str
     label: str
     role: str
@@ -55,7 +61,7 @@ class UIEntityPayload(BaseModel):
     bbox: BBoxPayload
 
 
-class DOMNodePayload(BaseModel):
+class DOMNodePayload(APIPayloadModel):
     dom_node_id: str
     role: str
     text: str
@@ -65,12 +71,12 @@ class DOMNodePayload(BaseModel):
     bbox: BBoxPayload
 
 
-class DecideRequest(BaseModel):
+class DecideRequest(APIPayloadModel):
     entities: list[UIEntityPayload]
     dom_nodes: list[DOMNodePayload]
 
 
-class DecideResponse(BaseModel):
+class DecideResponse(APIPayloadModel):
     status: str
     state: str
     dom_node_id: str | None = None
@@ -114,6 +120,11 @@ def create_app() -> FastAPI:
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         metrics.record(request.url.path, response.status_code, elapsed_ms)
         return response
+
+    @app.exception_handler(ValueError)
+    async def value_error_handler(_: Request, exc: ValueError):
+        envelope = map_exception_to_error(exc)
+        return JSONResponse(status_code=422, content={"error": envelope.__dict__})
 
     @app.post("/sessions", response_model=SessionCreatedResponse)
     def create_session(payload: CreateSessionRequest) -> SessionCreatedResponse:

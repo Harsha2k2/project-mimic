@@ -5,7 +5,17 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class ProjectMimicModel(BaseModel):
+    """Shared strict model config for public payload contracts."""
+
+    model_config = ConfigDict(
+        extra="forbid",
+        str_strip_whitespace=True,
+        validate_assignment=True,
+    )
 
 
 class ActionType(str, Enum):
@@ -16,9 +26,10 @@ class ActionType(str, Enum):
     WAIT = "wait"
 
 
-class UIAction(BaseModel):
+class UIAction(ProjectMimicModel):
     """Input action requested by the high-level agent."""
 
+    schema_version: str = "1.0"
     action_type: ActionType
     target: str | None = None
     x: int | None = None
@@ -41,9 +52,10 @@ class UIAction(BaseModel):
         return self
 
 
-class Observation(BaseModel):
+class Observation(ProjectMimicModel):
     """Observation returned after reset and step operations."""
 
+    schema_version: str = "1.0"
     step_index: int = Field(ge=0)
     goal: str
     status: str
@@ -53,8 +65,17 @@ class Observation(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-class Reward(BaseModel):
+class Reward(ProjectMimicModel):
     """Reward object with score and reason for explainability."""
 
-    score: float
+    schema_version: str = "1.0"
+    score: float = Field(ge=0.0)
     reason: str
+
+
+class ErrorCode(str, Enum):
+    """Machine-readable model error codes."""
+
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+    PAYLOAD_CONSTRAINT_VIOLATION = "PAYLOAD_CONSTRAINT_VIOLATION"
+    SERIALIZATION_ERROR = "SERIALIZATION_ERROR"

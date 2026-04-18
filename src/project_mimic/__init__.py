@@ -2,6 +2,7 @@
 
 from .environment import ProjectMimicEnv
 from .engine import ClickDecision, ExecutionEngine
+from .error_mapping import ErrorEnvelope, map_exception_to_error
 from .identity import (
     IdentityAllocator,
     IdentityBundle,
@@ -10,7 +11,7 @@ from .identity import (
     calculate_risk_score,
     should_rotate_identity,
 )
-from .models import ActionType, Observation, Reward, UIAction
+from .models import ActionType, ErrorCode, Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics
 from .policy import PolicyContext, PolicyDecision, PolicyEngine
 from .tasks import TaskDefinition, TaskDifficulty, TaskEvidence, grade_task, task_catalog
@@ -18,6 +19,8 @@ from .tasks import TaskDefinition, TaskDifficulty, TaskEvidence, grade_task, tas
 __all__ = [
     "ActionType",
     "ClickDecision",
+    "ErrorCode",
+    "ErrorEnvelope",
     "ExecutionEngine",
     "IdentityAllocator",
     "IdentityBundle",
@@ -28,6 +31,7 @@ __all__ = [
     "PolicyContext",
     "PolicyDecision",
     "PolicyEngine",
+    "ProjectMimicModel",
     "RiskSignals",
     "Reward",
     "TaskDefinition",
@@ -36,6 +40,7 @@ __all__ = [
     "UIAction",
     "calculate_risk_score",
     "grade_task",
+    "map_exception_to_error",
     "should_rotate_identity",
     "task_catalog",
 ]

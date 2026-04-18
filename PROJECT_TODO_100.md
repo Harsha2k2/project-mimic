@@ -12,11 +12,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 02: Core Data Models Hardening
 
-6. [ ] Add strict validation for all public Pydantic models.
-7. [ ] Add schema version field to API payload models.
-8. [ ] Add model serialization compatibility tests.
-9. [ ] Add explicit model error code mapping rules.
-10. [ ] Add migration notes for any model-breaking changes.
+6. [x] Add strict validation for all public Pydantic models.
+7. [x] Add schema version field to API payload models.
+8. [x] Add model serialization compatibility tests.
+9. [x] Add explicit model error code mapping rules.
+10. [x] Add migration notes for any model-breaking changes.
 
 ## Feature 03: Session Lifecycle and State Durability
 
