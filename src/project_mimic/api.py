@@ -148,6 +148,7 @@ class DecideResponse(APIPayloadModel):
 class APIErrorCode(str, Enum):
     VALIDATION_ERROR = "VALIDATION_ERROR"
     REQUEST_VALIDATION_ERROR = "REQUEST_VALIDATION_ERROR"
+    UNAUTHORIZED = "UNAUTHORIZED"
     SESSION_NOT_FOUND = "SESSION_NOT_FOUND"
     SESSION_EXPIRED = "SESSION_EXPIRED"
     SESSION_CONFLICT = "SESSION_CONFLICT"
@@ -183,6 +184,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Project Mimic API", version="0.1.0")
     session_ttl_seconds = int(os.getenv("SESSION_TTL_SECONDS", "1800"))
     scavenger_interval_seconds = int(os.getenv("SESSION_SCAVENGER_INTERVAL_SECONDS", "5"))
+    auth_keys = {item.strip() for item in os.getenv("API_AUTH_KEYS", "").split(",") if item.strip()}
 
     registry = SessionRegistry(ttl_seconds=session_ttl_seconds)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -196,6 +198,11 @@ def create_app() -> FastAPI:
         response.headers["Deprecation"] = "true"
         response.headers["Sunset"] = LEGACY_SUNSET_DATE
         response.headers["Link"] = f"<{DEPRECATION_DOC_PATH}>; rel=\"deprecation\""
+
+    def _is_auth_exempt_path(path: str) -> bool:
+        if path in {"/openapi.json", "/docs/oauth2-redirect"}:
+            return True
+        return path.startswith("/docs") or path == "/redoc"
 
     def _error_response(
         request: Request,
@@ -368,6 +375,21 @@ def create_app() -> FastAPI:
     async def metrics_middleware(request: Request, call_next):
         request_id = request.headers.get("x-request-id") or str(uuid4())
         request.state.request_id = request_id
+
+        if auth_keys and not _is_auth_exempt_path(request.url.path):
+            provided_key = request.headers.get("x-api-key", "")
+            if provided_key not in auth_keys:
+                unauthorized_response = _error_response(
+                    request,
+                    status_code=401,
+                    code=APIErrorCode.UNAUTHORIZED,
+                    message="missing or invalid api key",
+                )
+                unauthorized_response.headers["WWW-Authenticate"] = "ApiKey"
+                unauthorized_response.headers["X-Request-ID"] = request_id
+                unauthorized_response.headers["X-Correlation-ID"] = request_id
+                return unauthorized_response
+
         start = time.perf_counter()
         with api_tracer.start_span(
             "api.request",

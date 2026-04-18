@@ -213,3 +213,33 @@ def test_openapi_contains_decision_endpoint_examples() -> None:
         "application/json"
     ]["example"]
     assert response_example["status"] == "ok"
+
+
+def test_api_auth_blocks_protected_routes_when_key_missing(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "alpha-key")
+    client = TestClient(create_app())
+
+    response = client.post("/api/v1/sessions", json={"goal": "auth-check", "max_steps": 2})
+    assert response.status_code == 401
+    payload = response.json()
+    assert payload["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_api_auth_allows_valid_key(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "alpha-key")
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": "alpha-key"},
+        json={"goal": "auth-check", "max_steps": 2},
+    )
+    assert response.status_code == 200
+
+
+def test_api_auth_does_not_block_openapi(monkeypatch) -> None:
+    monkeypatch.setenv("API_AUTH_KEYS", "alpha-key")
+    client = TestClient(create_app())
+
+    response = client.get("/openapi.json")
+    assert response.status_code == 200
