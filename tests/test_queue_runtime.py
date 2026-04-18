@@ -1,4 +1,4 @@
-from project_mimic.queue_runtime import InMemoryActionQueue, JobStatus
+from project_mimic.queue_runtime import InMemoryActionQueue, JobStatus, JsonFileQueueStore
 
 
 class _Clock:
@@ -83,3 +83,35 @@ def test_recovery_requeues_expired_lease_for_other_worker() -> None:
 
     completed = queue.ack("worker-b", job.job_id)
     assert completed.status == JobStatus.COMPLETED
+
+
+def test_json_queue_store_restores_pending_jobs_after_reinit(tmp_path) -> None:
+    store_path = tmp_path / "queue-store.json"
+    store = JsonFileQueueStore(str(store_path))
+
+    queue = InMemoryActionQueue(store=store)
+    first = queue.dispatch({"action": "click"}, idempotency_key="persist-1")
+    second = queue.dispatch({"action": "type"}, idempotency_key="persist-2")
+    assert queue.queue_depth() == 2
+
+    reloaded = InMemoryActionQueue(store=store)
+    assert reloaded.queue_depth() == 2
+    leased = reloaded.lease_next("worker-r")
+    assert leased is not None
+    assert leased.job_id in {first.job_id, second.job_id}
+
+
+def test_json_queue_store_restores_dead_letter_jobs_after_reinit(tmp_path) -> None:
+    store_path = tmp_path / "queue-store.json"
+    store = JsonFileQueueStore(str(store_path))
+    queue = InMemoryActionQueue(store=store)
+
+    job = queue.dispatch({"action": "type"}, idempotency_key="persist-dlq")
+    job.max_attempts = 1
+    queue.lease_next("worker-a")
+    queue.fail("worker-a", job.job_id, reason="fatal")
+
+    reloaded = InMemoryActionQueue(store=store)
+    dead = reloaded.list_dead_letter()
+    assert len(dead) == 1
+    assert dead[0].job_id == job.job_id

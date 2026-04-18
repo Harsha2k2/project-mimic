@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import deque
 from enum import Enum
+import json
+from pathlib import Path
 import time
 from typing import Any, Protocol
 from uuid import uuid4
@@ -61,16 +63,57 @@ class ActionQueue(Protocol):
         ...
 
 
+class QueueStore(Protocol):
+    def save(self, payload: dict[str, Any]) -> None:
+        ...
+
+    def load(self) -> dict[str, Any] | None:
+        ...
+
+
+class InMemoryQueueStore:
+    def __init__(self) -> None:
+        self._payload: dict[str, Any] | None = None
+
+    def save(self, payload: dict[str, Any]) -> None:
+        self._payload = dict(payload)
+
+    def load(self) -> dict[str, Any] | None:
+        return dict(self._payload) if self._payload is not None else None
+
+
+class JsonFileQueueStore:
+    def __init__(self, file_path: str) -> None:
+        if not file_path.strip():
+            raise ValueError("file_path must not be empty")
+        self._path = Path(file_path)
+
+    def save(self, payload: dict[str, Any]) -> None:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._path.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+
+    def load(self) -> dict[str, Any] | None:
+        if not self._path.exists():
+            return None
+        content = self._path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        loaded = json.loads(content)
+        return loaded if isinstance(loaded, dict) else None
+
+
 class InMemoryActionQueue:
     """Queue runtime with worker leases, dead-lettering, and replay support."""
 
-    def __init__(self, now_fn=time.time) -> None:
+    def __init__(self, now_fn=time.time, store: QueueStore | None = None) -> None:
         self._now = now_fn
+        self._store = store or InMemoryQueueStore()
         self._jobs: dict[str, ActionJob] = {}
         self._idempotency: dict[str, str] = {}
         self._ready: deque[str] = deque()
         self._dead_letter: deque[str] = deque()
         self._leases: dict[str, WorkerLease] = {}
+        self._restore_from_store()
 
     def dispatch(self, action_payload: dict[str, Any], *, idempotency_key: str) -> ActionJob:
         key = idempotency_key.strip()
@@ -94,6 +137,7 @@ class InMemoryActionQueue:
         self._jobs[job.job_id] = job
         self._idempotency[key] = job.job_id
         self._ready.append(job.job_id)
+        self._persist_state()
         return job
 
     def lease_next(self, worker_id: str, *, lease_ttl_seconds: int = 30) -> ActionJob | None:
@@ -122,6 +166,7 @@ class InMemoryActionQueue:
                 lease_expires_at=expires_at,
                 heartbeat_at=now,
             )
+            self._persist_state()
             return job
 
         return None
@@ -151,6 +196,7 @@ class InMemoryActionQueue:
         job = self._jobs[job_id]
         job.lease_expires_at = updated.lease_expires_at
         job.updated_at = now
+        self._persist_state()
         return updated
 
     def ack(self, worker_id: str, job_id: str) -> ActionJob:
@@ -168,6 +214,7 @@ class InMemoryActionQueue:
         job.lease_expires_at = None
         job.updated_at = now
         self._leases.pop(job_id, None)
+        self._persist_state()
         return job
 
     def fail(self, worker_id: str, job_id: str, *, reason: str) -> ActionJob:
@@ -193,6 +240,7 @@ class InMemoryActionQueue:
             job.status = JobStatus.QUEUED
             self._ready.append(job_id)
 
+        self._persist_state()
         return job
 
     def replay_dead_letter(self, job_id: str) -> ActionJob:
@@ -213,6 +261,7 @@ class InMemoryActionQueue:
         except ValueError:
             pass
         self._ready.append(job_id)
+        self._persist_state()
         return job
 
     def requeue_expired_leases(self) -> int:
@@ -237,6 +286,8 @@ class InMemoryActionQueue:
                 job.status = JobStatus.QUEUED
                 self._ready.append(job_id)
             recovered += 1
+        if recovered:
+            self._persist_state()
         return recovered
 
     def get_job(self, job_id: str) -> ActionJob:
@@ -247,3 +298,55 @@ class InMemoryActionQueue:
 
     def queue_depth(self) -> int:
         return len([job_id for job_id in self._ready if self._jobs[job_id].status == JobStatus.QUEUED])
+
+    def _persist_state(self) -> None:
+        payload = {
+            "jobs": {job_id: job.model_dump(mode="json") for job_id, job in self._jobs.items()},
+            "idempotency": dict(self._idempotency),
+            "ready": list(self._ready),
+            "dead_letter": list(self._dead_letter),
+            "leases": {job_id: lease.model_dump(mode="json") for job_id, lease in self._leases.items()},
+        }
+        self._store.save(payload)
+
+    def _restore_from_store(self) -> None:
+        payload = self._store.load()
+        if not payload:
+            return
+
+        jobs_payload = payload.get("jobs", {})
+        idempotency_payload = payload.get("idempotency", {})
+        ready_payload = payload.get("ready", [])
+        dead_letter_payload = payload.get("dead_letter", [])
+        leases_payload = payload.get("leases", {})
+
+        if isinstance(jobs_payload, dict):
+            for job_id, data in jobs_payload.items():
+                if isinstance(job_id, str) and isinstance(data, dict):
+                    self._jobs[job_id] = ActionJob(**data)
+
+        if isinstance(idempotency_payload, dict):
+            self._idempotency = {
+                str(key): str(value)
+                for key, value in idempotency_payload.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+
+        if isinstance(ready_payload, list):
+            self._ready = deque(
+                job_id
+                for job_id in ready_payload
+                if isinstance(job_id, str) and job_id in self._jobs
+            )
+
+        if isinstance(dead_letter_payload, list):
+            self._dead_letter = deque(
+                job_id
+                for job_id in dead_letter_payload
+                if isinstance(job_id, str) and job_id in self._jobs
+            )
+
+        if isinstance(leases_payload, dict):
+            for job_id, data in leases_payload.items():
+                if isinstance(job_id, str) and isinstance(data, dict) and job_id in self._jobs:
+                    self._leases[job_id] = WorkerLease(**data)

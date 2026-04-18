@@ -80,6 +80,7 @@ from .mimetic import (
 from .observability import InMemoryMetrics, OpenTelemetryTracer, TraceSpan
 from .policy import PolicyContext, PolicyDecision, PolicyEngine
 from .queue_runtime import ActionJob, InMemoryActionQueue, JobStatus, WorkerLease
+from .queue_runtime import InMemoryQueueStore, JsonFileQueueStore, QueueStore
 from .reliability import (
     BackoffPolicy,
     CheckpointRecoveryError,
@@ -171,7 +172,9 @@ __all__ = [
     "InMemorySessionMetadataStore",
     "InvalidSessionTransitionError",
     "InMemoryActionQueue",
+    "InMemoryQueueStore",
     "JobStatus",
+    "JsonFileQueueStore",
     "ProjectMimicEnv",
     "ProxyEndpoint",
     "ProxyHealthEvent",
@@ -220,6 +223,7 @@ __all__ = [
     "TypoCorrectionStrategy",
     "UIAction",
     "ActionJob",
+    "QueueStore",
     "TimeoutFailure",
     "TransientDependencyError",
     "WebhookAuditExportSink",
