@@ -17,6 +17,6 @@ Distributed vision-based user emulation engine with high-fidelity simulation, or
 ## Quickstart
 
 ```bash
-python -m pip install -e .[dev]
-pytest
+make setup
+make test
 ```
