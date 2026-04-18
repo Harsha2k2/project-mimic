@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from .determinism import set_global_seed
 from .tasks import TaskEvidence, grade_task, task_catalog
 
 
@@ -89,7 +90,14 @@ def infer_task_with_openai(client: Any, model: str, task_id: str, description: s
     return parse_evidence(payload)
 
 
-def run_baseline(client: Any | None = None, model: str | None = None) -> list[BaselineResult]:
+def run_baseline(
+    client: Any | None = None,
+    model: str | None = None,
+    deterministic_seed: int | None = None,
+) -> list[BaselineResult]:
+    if deterministic_seed is not None:
+        set_global_seed(deterministic_seed)
+
     results: list[BaselineResult] = []
     for task in task_catalog():
         if client is None or not model:

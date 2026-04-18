@@ -8,6 +8,7 @@ import random
 import time
 from typing import Callable, TypeVar
 
+from .determinism import resolve_seed
 
 class FailureCode(str, Enum):
     TRANSIENT_DEPENDENCY = "TRANSIENT_DEPENDENCY"
@@ -118,7 +119,8 @@ class BackoffPolicy:
 
         capped = min(self.max_delay_ms, self.base_delay_ms * (2**attempt))
         jitter_span = capped * max(0.0, min(self.jitter_ratio, 1.0))
-        rng = random.Random((deterministic_seed or 0) + attempt)
+        seed = resolve_seed(deterministic_seed) or 0
+        rng = random.Random(seed + attempt)
         jittered = capped + rng.uniform(-jitter_span, jitter_span)
         return max(0, int(jittered))
 

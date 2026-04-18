@@ -14,7 +14,9 @@ from .artifacts import (
     FilesystemArtifactWriter,
     InMemoryArtifactWriter,
 )
+from .benchmarking import BenchmarkReport, BenchmarkTaskResult, run_benchmark
 from .engine import ClickDecision, ExecutionEngine
+from .determinism import get_global_seed, resolve_seed, set_global_seed
 from .error_mapping import ErrorEnvelope, map_exception_to_error
 from .identity import (
     IdentityAllocator,
@@ -123,6 +125,8 @@ __all__ = [
     "ArtifactType",
     "ArtifactWriteError",
     "AttachSiteTaskRequest",
+    "BenchmarkReport",
+    "BenchmarkTaskResult",
     "ClickDecision",
     "CloseSessionRequest",
     "CloseSessionResponse",
@@ -215,10 +219,14 @@ __all__ = [
     "map_exception_to_error",
     "movement_profile_for_viewport",
     "is_outbound_host_allowed",
+    "get_global_seed",
     "plan_pointer_stream",
     "redact_sensitive_structure",
     "redact_sensitive_text",
     "render_overlay",
+    "resolve_seed",
+    "run_benchmark",
+    "set_global_seed",
     "should_rotate_identity",
     "synthesize_typing_stream",
     "task_catalog",

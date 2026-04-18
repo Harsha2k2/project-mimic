@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from random import Random
 
+from ..determinism import resolve_seed
 from .contracts import MimeticEvent, MimeticEventStream
 from .profiles import movement_profile_for_viewport
 
@@ -36,7 +37,8 @@ def plan_pointer_stream(
     deterministic_seed: int | None = None,
 ) -> MimeticEventStream:
     profile = movement_profile_for_viewport(viewport_width, viewport_height)
-    rng = Random(deterministic_seed)
+    seed = resolve_seed(deterministic_seed)
+    rng = Random(seed)
 
     events: list[MimeticEvent] = []
     for index in range(profile.step_count):
@@ -64,7 +66,7 @@ def plan_pointer_stream(
     return MimeticEventStream(
         channel="pointer",
         profile=profile.name,
-        deterministic_seed=deterministic_seed,
+        deterministic_seed=seed,
         events=events,
     )
 
@@ -80,7 +82,8 @@ def synthesize_typing_stream(
         raise ValueError("base_delay_ms must be non-negative")
 
     normalized = (strategy or TypoCorrectionStrategy()).normalized()
-    rng = Random(deterministic_seed)
+    seed = resolve_seed(deterministic_seed)
+    rng = Random(seed)
 
     events: list[MimeticEvent] = []
     current_t = 0
@@ -116,7 +119,7 @@ def synthesize_typing_stream(
     return MimeticEventStream(
         channel="keyboard",
         profile="typing-v1",
-        deterministic_seed=deterministic_seed,
+        deterministic_seed=seed,
         events=events,
     )
 

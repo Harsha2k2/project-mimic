@@ -140,11 +140,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 18: Baseline Evaluation and Benchmarks
 
-86. [ ] Add benchmark command with per-task timing metrics.
-87. [ ] Add deterministic seed mode across all planners.
-88. [ ] Add comparison report between deterministic and model modes.
-89. [ ] Add score trend history output in JSON format.
-90. [ ] Add tests for benchmark reproducibility tolerances.
+86. [x] Add benchmark command with per-task timing metrics.
+87. [x] Add deterministic seed mode across all planners.
+88. [x] Add comparison report between deterministic and model modes.
+89. [x] Add score trend history output in JSON format.
+90. [x] Add tests for benchmark reproducibility tolerances.
 
 ## Feature 19: Developer Experience and Documentation
 
