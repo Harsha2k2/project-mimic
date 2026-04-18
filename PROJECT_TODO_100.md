@@ -156,8 +156,8 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 20: Release and Production Readiness
 
-96. [ ] Add semantic version release script and changelog automation.
-97. [ ] Add production readiness checklist with hard gates.
-98. [ ] Add blue-green rollout runbook for API and workers.
-99. [ ] Add rollback validation checklist with smoke tests.
-100. [ ] Add final launch review template with sign-off owners.
+96. [x] Add semantic version release script and changelog automation.
+97. [x] Add production readiness checklist with hard gates.
+98. [x] Add blue-green rollout runbook for API and workers.
+99. [x] Add rollback validation checklist with smoke tests.
+100. [x] Add final launch review template with sign-off owners.

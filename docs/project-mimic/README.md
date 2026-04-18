@@ -27,16 +27,27 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `ops/03-observability-security.md`
   - `ops/04-contributor-quickstart.md`
   - `ops/05-troubleshooting.md`
+  - `ops/06-production-readiness-checklist.md`
+  - `ops/07-blue-green-rollout-runbook.md`
+  - `ops/08-rollback-validation.md`
+  - `ops/09-launch-review-template.md`
 - ADR
   - `adr/README.md`
   - `adr/TEMPLATE.md`
 - Stack
   - `TECH_STACK.md`
 - Architecture Diagrams (one-by-one)
+  - `lld/06-orchestrator-internals.md`
+  - `lld/07-vision-internals.md`
   - `diagrams/README.md`
   - `diagrams/01-system-architecture.md`
   - `diagrams/02-control-plane-architecture.md`
   - `diagrams/03-simulation-plane-architecture.md`
+  - `ops/04-contributor-quickstart.md`
+  - `ops/05-troubleshooting.md`
+- ADR
+  - `adr/README.md`
+  - `adr/TEMPLATE.md`
   - `diagrams/04-goal-to-click-sequence.md`
   - `diagrams/05-decision-orchestrator-architecture.md`
   - `diagrams/06-kubernetes-deployment-architecture.md`

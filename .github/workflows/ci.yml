@@ -12,15 +12,33 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Validate docs package
         run: python tools/docs/validate_docs.py
+
+  release-sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run release automation dry-run
+        run: python tools/release/create_release.py 0.0.0-ci --dry-run
 
   python-tests:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -32,7 +50,7 @@ jobs:
           python -m pip install -e .[dev]
 
       - name: Run tests
-        run: pytest
+        run: pytest -q
 
   rust-tests:
     runs-on: ubuntu-latest

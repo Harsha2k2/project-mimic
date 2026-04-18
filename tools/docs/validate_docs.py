@@ -10,8 +10,13 @@ REQUIRED_DOCS = [
     "docs/project-mimic/README.md",
     "docs/project-mimic/adr/README.md",
     "docs/project-mimic/adr/TEMPLATE.md",
+    "docs/project-mimic/adr/0001-adopt-vision-first-grounding.md",
     "docs/project-mimic/ops/04-contributor-quickstart.md",
     "docs/project-mimic/ops/05-troubleshooting.md",
+    "docs/project-mimic/ops/06-production-readiness-checklist.md",
+    "docs/project-mimic/ops/07-blue-green-rollout-runbook.md",
+    "docs/project-mimic/ops/08-rollback-validation.md",
+    "docs/project-mimic/ops/09-launch-review-template.md",
     "docs/project-mimic/lld/06-orchestrator-internals.md",
     "docs/project-mimic/lld/07-vision-internals.md",
 ]
