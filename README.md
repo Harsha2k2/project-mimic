@@ -19,4 +19,12 @@ Distributed vision-based user emulation engine with high-fidelity simulation, or
 ```bash
 make setup
 make test
+
+# Run baseline scoring (deterministic fallback if env vars are missing)
+python inference.py
 ```
+
+## OpenEnv Metadata
+
+- `openenv.yaml` defines environment metadata, tasks, and runtime variables.
+- `inference.py` runs baseline evaluation over easy, medium, and hard tasks.

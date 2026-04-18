@@ -1,0 +1,25 @@
+name: project-mimic
+description: Distributed vision-based user emulation environment for browser tasks.
+version: 0.1.0
+entrypoint: src/project_mimic/environment.py
+api:
+  reset: ProjectMimicEnv.reset
+  step: ProjectMimicEnv.step
+  state: ProjectMimicEnv.state
+tasks:
+  - id: easy.search_submit
+    difficulty: easy
+    grader: project_mimic.tasks.grade_task
+  - id: medium.compare_three_sites
+    difficulty: medium
+    grader: project_mimic.tasks.grade_task
+  - id: hard.layover_five_sites
+    difficulty: hard
+    grader: project_mimic.tasks.grade_task
+runtime:
+  inference_script: inference.py
+  env_vars:
+    - API_BASE_URL
+    - MODEL_NAME
+    - OPENAI_API_KEY
+    - HF_TOKEN
