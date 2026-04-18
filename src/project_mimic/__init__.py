@@ -14,6 +14,12 @@ from .artifacts import (
     FilesystemArtifactWriter,
     InMemoryArtifactWriter,
 )
+from .audit_export import (
+    AuditExportSink,
+    FileAuditExportSink,
+    WebhookAuditExportSink,
+    build_audit_export_sink_from_env,
+)
 from .benchmarking import BenchmarkReport, BenchmarkTaskResult, run_benchmark
 from .engine import ClickDecision, ExecutionEngine
 from .determinism import get_global_seed, resolve_seed, set_global_seed
@@ -125,9 +131,11 @@ __all__ = [
     "ArtifactRetentionPolicy",
     "ArtifactType",
     "ArtifactWriteError",
+    "AuditExportSink",
     "AttachSiteTaskRequest",
     "BenchmarkReport",
     "BenchmarkTaskResult",
+    "FileAuditExportSink",
     "ClickDecision",
     "CloseSessionRequest",
     "CloseSessionResponse",
@@ -208,6 +216,7 @@ __all__ = [
     "ActionJob",
     "TimeoutFailure",
     "TransientDependencyError",
+    "WebhookAuditExportSink",
     "VerifyStepRequest",
     "VerifyStepResponse",
     "VisionServiceHandler",
@@ -219,6 +228,7 @@ __all__ = [
     "grade_task",
     "jitter_profile_for_device",
     "map_exception_to_error",
+    "build_audit_export_sink_from_env",
     "movement_profile_for_viewport",
     "is_outbound_host_allowed",
     "get_global_seed",

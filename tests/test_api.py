@@ -461,3 +461,41 @@ def test_audit_logs_capture_mutations_and_require_admin(monkeypatch) -> None:
     denied_logs = client.get("/api/v1/audit/logs", headers={"X-API-Key": "operator-key"})
     assert denied_logs.status_code == 403
     assert denied_logs.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_audit_export_endpoint_writes_file(monkeypatch, tmp_path) -> None:
+    export_path = tmp_path / "audit-export.jsonl"
+    monkeypatch.setenv("API_AUTH_KEYS", "admin-key,operator-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "admin-key:admin,operator-key:operator")
+    monkeypatch.setenv("API_AUTH_TENANT_MAP", "admin-key:tenant-admin,operator-key:tenant-op")
+    monkeypatch.setenv("AUDIT_EXPORT_DESTINATION", "file")
+    monkeypatch.setenv("AUDIT_EXPORT_FILE_PATH", str(export_path))
+    client = TestClient(create_app())
+
+    created = client.post(
+        "/api/v1/sessions",
+        headers={"X-API-Key": "operator-key"},
+        json={"goal": "export-audit", "max_steps": 2},
+    )
+    assert created.status_code == 200
+
+    exported = client.post("/api/v1/audit/export", headers={"X-API-Key": "admin-key"})
+    assert exported.status_code == 200
+    payload = exported.json()
+    assert payload["destination"] == "file"
+    assert payload["exported"] >= 1
+    assert export_path.exists()
+
+
+def test_audit_export_requires_admin(monkeypatch, tmp_path) -> None:
+    export_path = tmp_path / "audit-export.jsonl"
+    monkeypatch.setenv("API_AUTH_KEYS", "admin-key,operator-key")
+    monkeypatch.setenv("API_AUTH_ROLE_MAP", "admin-key:admin,operator-key:operator")
+    monkeypatch.setenv("API_AUTH_TENANT_MAP", "admin-key:tenant-admin,operator-key:tenant-op")
+    monkeypatch.setenv("AUDIT_EXPORT_DESTINATION", "file")
+    monkeypatch.setenv("AUDIT_EXPORT_FILE_PATH", str(export_path))
+    client = TestClient(create_app())
+
+    denied = client.post("/api/v1/audit/export", headers={"X-API-Key": "operator-key"})
+    assert denied.status_code == 403
+    assert denied.json()["error"]["code"] == "FORBIDDEN"

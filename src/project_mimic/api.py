@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ConfigDict, Field
 
 from .error_mapping import map_exception_to_error
+from .audit_export import build_audit_export_sink_from_env
 from .engine import ExecutionEngine
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
@@ -234,6 +235,12 @@ class AuditLogListResponse(APIPayloadModel):
     total: int
 
 
+class AuditExportResponse(APIPayloadModel):
+    exported: int
+    destination: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -345,6 +352,7 @@ def create_app() -> FastAPI:
     registry = SessionRegistry(ttl_seconds=session_ttl_seconds)
     api_tracer = OpenTelemetryTracer(component="api")
     orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
+    audit_sink = build_audit_export_sink_from_env()
     engine = ExecutionEngine(orchestrator=DecisionOrchestrator(tracer=orchestrator_tracer))
     metrics = InMemoryMetrics()
     scavenger_stop = Event()
@@ -363,7 +371,12 @@ def create_app() -> FastAPI:
     def _required_role_for_request(method: str, path: str) -> str:
         if path.startswith(f"{API_V1_PREFIX}/auth/keys") or path.startswith("/auth/keys"):
             return "admin"
-        if path.startswith(f"{API_V1_PREFIX}/audit/logs") or path.startswith("/audit/logs"):
+        if (
+            path.startswith(f"{API_V1_PREFIX}/audit/logs")
+            or path.startswith("/audit/logs")
+            or path.startswith(f"{API_V1_PREFIX}/audit/export")
+            or path.startswith("/audit/export")
+        ):
             return "admin"
         if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
             return "operator"
@@ -409,6 +422,20 @@ def create_app() -> FastAPI:
         selected = list(reversed(filtered))[:limit]
         items = [AuditLogEntry(**item) for item in selected]
         return AuditLogListResponse(items=items, total=len(filtered))
+
+    def _export_audit_events() -> AuditExportResponse:
+        if audit_sink is None:
+            raise HTTPException(status_code=400, detail="audit export destination is not configured")
+
+        try:
+            export_result = audit_sink.export(list(audit_events))
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"audit export failed: {exc}") from exc
+
+        destination = str(export_result.get("destination", "unknown"))
+        exported = int(export_result.get("exported", 0))
+        metadata = {k: v for k, v in export_result.items() if k not in {"destination", "exported"}}
+        return AuditExportResponse(exported=exported, destination=destination, metadata=metadata)
 
     def _reject_limit(
         request: Request,
@@ -1114,6 +1141,15 @@ def create_app() -> FastAPI:
     ) -> AuditLogListResponse:
         _set_deprecation_headers(response)
         return _list_audit_events(action=action, tenant_id=tenant_id, limit=limit)
+
+    @app.post(f"{API_V1_PREFIX}/audit/export", response_model=AuditExportResponse)
+    def export_audit_logs_v1() -> AuditExportResponse:
+        return _export_audit_events()
+
+    @app.post("/audit/export", response_model=AuditExportResponse, deprecated=True)
+    def export_audit_logs_legacy(response: Response) -> AuditExportResponse:
+        _set_deprecation_headers(response)
+        return _export_audit_events()
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
