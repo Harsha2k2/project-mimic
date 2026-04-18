@@ -11,6 +11,7 @@ from .identity import (
     should_rotate_identity,
 )
 from .models import ActionType, Observation, Reward, UIAction
+from .observability import InMemoryMetrics
 from .tasks import TaskDefinition, TaskDifficulty, TaskEvidence, grade_task, task_catalog
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "IdentityAllocator",
     "IdentityBundle",
     "Observation",
+    "InMemoryMetrics",
     "ProjectMimicEnv",
     "ProxyEndpoint",
     "RiskSignals",

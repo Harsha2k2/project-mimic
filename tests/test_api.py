@@ -117,3 +117,18 @@ def test_decision_click_returns_no_target_for_non_interactable_dom() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "no_target"
+
+
+def test_metrics_endpoint_tracks_requests() -> None:
+    client = TestClient(create_app())
+
+    create = client.post("/sessions", json={"goal": "metrics check", "max_steps": 2})
+    assert create.status_code == 200
+
+    metrics = client.get("/metrics")
+    assert metrics.status_code == 200
+    payload = metrics.json()
+
+    assert "/sessions" in payload["requests"]
+    assert payload["requests"]["/sessions"] >= 1
+    assert "200" in payload["status_codes"]

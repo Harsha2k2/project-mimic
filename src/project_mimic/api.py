@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 from threading import Lock
+import time
 from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
+from fastapi import Request
 from pydantic import BaseModel, Field
 
 from .engine import ExecutionEngine
 from .environment import ProjectMimicEnv
 from .models import Observation, Reward, UIAction
+from .observability import InMemoryMetrics
 from .vision.grounding import BBox, DOMNode, UIEntity
 
 
@@ -102,6 +105,15 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Project Mimic API", version="0.1.0")
     registry = SessionRegistry()
     engine = ExecutionEngine()
+    metrics = InMemoryMetrics()
+
+    @app.middleware("http")
+    async def metrics_middleware(request: Request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        metrics.record(request.url.path, response.status_code, elapsed_ms)
+        return response
 
     @app.post("/sessions", response_model=SessionCreatedResponse)
     def create_session(payload: CreateSessionRequest) -> SessionCreatedResponse:
@@ -186,6 +198,10 @@ def create_app() -> FastAPI:
             y=decision.y,
             score=decision.score,
         )
+
+    @app.get("/metrics")
+    def get_metrics() -> dict[str, Any]:
+        return metrics.snapshot()
 
     return app
 
