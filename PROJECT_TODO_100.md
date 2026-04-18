@@ -132,11 +132,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 17: Artifacts and Data Pipeline
 
-81. [ ] Add artifact writer abstraction for screenshots and traces.
-82. [ ] Add retention policy and cleanup scheduler.
-83. [ ] Add metadata index for fast replay lookup.
-84. [ ] Add data integrity checks for uploaded artifacts.
-85. [ ] Add tests for artifact write failure fallback behavior.
+81. [x] Add artifact writer abstraction for screenshots and traces.
+82. [x] Add retention policy and cleanup scheduler.
+83. [x] Add metadata index for fast replay lookup.
+84. [x] Add data integrity checks for uploaded artifacts.
+85. [x] Add tests for artifact write failure fallback behavior.
 
 ## Feature 18: Baseline Evaluation and Benchmarks
 

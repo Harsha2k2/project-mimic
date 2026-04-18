@@ -2,6 +2,18 @@
 
 from .environment import ProjectMimicEnv
 from .deploy_overlays import deep_merge, load_yaml_dict, render_overlay
+from .artifacts import (
+    ArtifactCleanupScheduler,
+    ArtifactIndex,
+    ArtifactIntegrityError,
+    ArtifactManager,
+    ArtifactRecord,
+    ArtifactRetentionPolicy,
+    ArtifactType,
+    ArtifactWriteError,
+    FilesystemArtifactWriter,
+    InMemoryArtifactWriter,
+)
 from .engine import ClickDecision, ExecutionEngine
 from .error_mapping import ErrorEnvelope, map_exception_to_error
 from .identity import (
@@ -102,6 +114,14 @@ __all__ = [
     "Ack",
     "AnalyzeFrameRequest",
     "AnalyzeFrameResponse",
+    "ArtifactCleanupScheduler",
+    "ArtifactIndex",
+    "ArtifactIntegrityError",
+    "ArtifactManager",
+    "ArtifactRecord",
+    "ArtifactRetentionPolicy",
+    "ArtifactType",
+    "ArtifactWriteError",
     "AttachSiteTaskRequest",
     "ClickDecision",
     "CloseSessionRequest",
@@ -119,6 +139,7 @@ __all__ = [
     "GroundActionResponse",
     "IdentityAllocator",
     "IdentityBundle",
+    "InMemoryArtifactWriter",
     "InMemoryProxyPoolStore",
     "Observation",
     "JitterProfile",
@@ -167,6 +188,7 @@ __all__ = [
     "CloudSecretProvider",
     "EnvironmentSecretProvider",
     "FileSecretProvider",
+    "FilesystemArtifactWriter",
     "FailureCode",
     "MTLSConfig",
     "TaskDefinition",
