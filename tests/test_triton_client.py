@@ -76,3 +76,45 @@ def test_infer_raises_on_http_error() -> None:
 
     with pytest.raises(TritonInferenceError):
         client.infer(b"image", task_hint="anything")
+
+
+def test_infer_entities_applies_normalization_dedup_and_cache() -> None:
+    fake = _FakeClient(
+        _FakeResponse(
+            200,
+            {
+                "entities": [
+                    {
+                        "entity_id": "e1",
+                        "label": "Price",
+                        "role": "textbox",
+                        "text": "€ 120",
+                        "x": 10,
+                        "y": 20,
+                        "width": 100,
+                        "height": 30,
+                        "confidence": 0.91,
+                    },
+                    {
+                        "entity_id": "e2",
+                        "label": "Price",
+                        "role": "textbox",
+                        "text": "€ 120",
+                        "x": 11,
+                        "y": 21,
+                        "width": 100,
+                        "height": 30,
+                        "confidence": 0.89,
+                    },
+                ]
+            },
+        )
+    )
+    client = TritonVisionClient(TritonConfig(endpoint="http://triton", model_name="ui-detector"), client=fake)
+
+    first = client.infer_entities(b"same-frame", locale="de_DE")
+    second = client.infer_entities(b"same-frame", locale="de_DE")
+
+    assert len(first) == 1
+    assert first[0].text.startswith("EUR")
+    assert len(second) == 1

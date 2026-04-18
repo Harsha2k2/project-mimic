@@ -9,6 +9,12 @@ from typing import Any
 import httpx
 
 from .grounding import BBox, UIEntity
+from .pipeline import (
+    VisionTemporalCache,
+    apply_role_thresholds,
+    deduplicate_entities,
+    normalize_ocr_text,
+)
 
 
 class TritonInferenceError(RuntimeError):
@@ -28,6 +34,7 @@ class TritonVisionClient:
     def __init__(self, config: TritonConfig, client: httpx.Client | None = None) -> None:
         self.config = config
         self._client = client or httpx.Client(timeout=config.timeout_s)
+        self._cache = VisionTemporalCache()
 
     def infer(self, screenshot: bytes, task_hint: str = "") -> dict[str, Any]:
         payload = _build_payload(screenshot=screenshot, task_hint=task_hint)
@@ -47,16 +54,28 @@ class TritonVisionClient:
 
         return data
 
-    def infer_entities(self, screenshot: bytes, task_hint: str = "") -> list[UIEntity]:
+    def infer_entities(
+        self,
+        screenshot: bytes,
+        task_hint: str = "",
+        locale: str = "en_US",
+        role_thresholds: dict[str, float] | None = None,
+    ) -> list[UIEntity]:
+        cache_key = self._cache.make_key(screenshot)
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         raw = self.infer(screenshot=screenshot, task_hint=task_hint)
         entities = []
         for item in raw.get("entities", []):
+            normalized_text = normalize_ocr_text(str(item.get("text", "")), locale=locale)
             entities.append(
                 UIEntity(
                     entity_id=str(item.get("entity_id", "")),
                     label=str(item.get("label", "")),
                     role=str(item.get("role", "")),
-                    text=str(item.get("text", "")),
+                    text=normalized_text,
                     bbox=BBox(
                         x=int(item.get("x", 0)),
                         y=int(item.get("y", 0)),
@@ -66,7 +85,10 @@ class TritonVisionClient:
                     confidence=float(item.get("confidence", 0.0)),
                 )
             )
-        return entities
+        deduped = deduplicate_entities(entities)
+        filtered = apply_role_thresholds(deduped, thresholds=role_thresholds)
+        self._cache.set(cache_key, filtered)
+        return filtered
 
 
 def _build_payload(screenshot: bytes, task_hint: str) -> dict[str, Any]:

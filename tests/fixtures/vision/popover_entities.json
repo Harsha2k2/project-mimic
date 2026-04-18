@@ -1,0 +1,26 @@
+{
+  "entities": [
+    {
+      "entity_id": "e1",
+      "label": "Search",
+      "role": "button",
+      "text": "Search Flights",
+      "x": 100,
+      "y": 100,
+      "width": 120,
+      "height": 40,
+      "confidence": 0.92
+    },
+    {
+      "entity_id": "e2",
+      "label": "Search",
+      "role": "button",
+      "text": "Search Flights",
+      "x": 102,
+      "y": 101,
+      "width": 120,
+      "height": 40,
+      "confidence": 0.88
+    }
+  ]
+}

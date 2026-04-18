@@ -36,11 +36,11 @@ This backlog is organized feature-by-feature, each with five concrete subtasks.
 
 ## Feature 05: Vision Pipeline Robustness
 
-21. [ ] Add OCR normalization for locale-specific symbols.
-22. [ ] Add entity deduplication across near-identical boxes.
-23. [ ] Add temporal cache keyed by frame similarity hash.
-24. [ ] Add confidence threshold policy per entity role.
-25. [ ] Add test fixtures for dynamic popovers and overlays.
+21. [x] Add OCR normalization for locale-specific symbols.
+22. [x] Add entity deduplication across near-identical boxes.
+23. [x] Add temporal cache keyed by frame similarity hash.
+24. [x] Add confidence threshold policy per entity role.
+25. [x] Add test fixtures for dynamic popovers and overlays.
 
 ## Feature 06: Mimetic Layer and Rust Bridge
 

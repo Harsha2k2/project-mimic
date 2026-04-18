@@ -1,0 +1,26 @@
+{
+  "entities": [
+    {
+      "entity_id": "e3",
+      "label": "Price",
+      "role": "textbox",
+      "text": "€ 120",
+      "x": 50,
+      "y": 50,
+      "width": 140,
+      "height": 36,
+      "confidence": 0.61
+    },
+    {
+      "entity_id": "e4",
+      "label": "Dismiss",
+      "role": "link",
+      "text": "Close",
+      "x": 10,
+      "y": 10,
+      "width": 50,
+      "height": 20,
+      "confidence": 0.51
+    }
+  ]
+}
