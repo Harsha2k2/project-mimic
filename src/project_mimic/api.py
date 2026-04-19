@@ -80,6 +80,11 @@ from .regional_failover import (
     RegionalFailoverOrchestrator,
 )
 from .security import redact_sensitive_structure, redact_sensitive_text
+from .status_portal import (
+    CustomerStatusPortalService,
+    InMemoryStatusPortalStore,
+    JsonFileStatusPortalStore,
+)
 from .synthetic_monitoring import SyntheticMonitor
 from .orchestrator.decision_orchestrator import DecisionOrchestrator
 from .session_lifecycle import (
@@ -1214,6 +1219,68 @@ class PrivacyAnalyticsReportListResponse(APIPayloadModel):
     total: int
 
 
+class StatusServiceUpsertRequest(APIPayloadModel):
+    display_name: str
+    status: str
+    availability_percent: float = Field(ge=0.0, le=100.0)
+    latency_p95_ms: float = Field(ge=0.0)
+    error_rate_percent: float = Field(ge=0.0, le=100.0)
+    components: dict[str, str] = Field(default_factory=dict)
+    message: str | None = None
+
+
+class StatusServiceResponse(APIPayloadModel):
+    service_id: str
+    display_name: str
+    status: str
+    availability_percent: float
+    latency_p95_ms: float
+    error_rate_percent: float
+    components: dict[str, str] = Field(default_factory=dict)
+    message: str | None = None
+    created_at: float
+    updated_at: float
+
+
+class StatusServiceListResponse(APIPayloadModel):
+    items: list[StatusServiceResponse]
+    total: int
+
+
+class StatusSLATargetUpsertRequest(APIPayloadModel):
+    availability_target_percent: float = Field(ge=0.0, le=100.0)
+    latency_p95_target_ms: float = Field(gt=0.0)
+    error_rate_target_percent: float = Field(ge=0.0, le=100.0)
+    window_days: int = Field(ge=1)
+
+
+class StatusSLATargetResponse(APIPayloadModel):
+    service_id: str
+    availability_target_percent: float
+    latency_p95_target_ms: float
+    error_rate_target_percent: float
+    window_days: int
+    created_at: float
+    updated_at: float
+
+
+class StatusSLATargetListResponse(APIPayloadModel):
+    items: list[StatusSLATargetResponse]
+    total: int
+
+
+class StatusSLAEvaluationResponse(APIPayloadModel):
+    service_id: str
+    meets_sla: bool
+    availability_ok: bool
+    latency_ok: bool
+    error_rate_ok: bool
+    violations: list[str] = Field(default_factory=list)
+    status: StatusServiceResponse
+    target: StatusSLATargetResponse
+    evaluated_at: float
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1327,6 +1394,8 @@ def create_app() -> FastAPI:
     policy_verification_file_path = os.getenv("POLICY_VERIFICATION_FILE_PATH", "")
     privacy_analytics_store_type = os.getenv("PRIVACY_ANALYTICS_STORE", "memory").strip().lower()
     privacy_analytics_file_path = os.getenv("PRIVACY_ANALYTICS_FILE_PATH", "")
+    status_portal_store_type = os.getenv("STATUS_PORTAL_STORE", "memory").strip().lower()
+    status_portal_file_path = os.getenv("STATUS_PORTAL_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -1558,6 +1627,13 @@ def create_app() -> FastAPI:
     else:
         privacy_analytics_store = InMemoryPrivacyAnalyticsStore()
 
+    if status_portal_store_type == "file":
+        if not status_portal_file_path:
+            raise RuntimeError("STATUS_PORTAL_FILE_PATH is required when STATUS_PORTAL_STORE=file")
+        status_portal_store = JsonFileStatusPortalStore(status_portal_file_path)
+    else:
+        status_portal_store = InMemoryStatusPortalStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -1701,6 +1777,7 @@ def create_app() -> FastAPI:
     )
     policy_verification = PolicyVerificationService(store=policy_verification_store)
     privacy_analytics = PrivacyPreservingAnalyticsService(store=privacy_analytics_store)
+    status_portal = CustomerStatusPortalService(store=status_portal_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -1805,6 +1882,14 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/analytics/privacy/events") or path.startswith("/analytics/privacy/events"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/analytics/privacy") or path.startswith("/analytics/privacy"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/status/sla") or path.startswith("/status/sla"):
+            if method.upper() in {"GET"}:
+                return "operator"
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/status/services") or path.startswith("/status/services"):
+            if method.upper() in {"GET"}:
+                return "viewer"
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -4019,6 +4104,134 @@ def create_app() -> FastAPI:
         if report is None:
             raise HTTPException(status_code=404, detail="privacy analytics report not found")
         return _to_privacy_analytics_report_response(report)
+
+    def _to_status_service_response(payload: dict[str, Any]) -> StatusServiceResponse:
+        return StatusServiceResponse(
+            service_id=str(payload.get("service_id", "")),
+            display_name=str(payload.get("display_name", "")),
+            status=str(payload.get("status", "")),
+            availability_percent=float(payload.get("availability_percent", 0.0)),
+            latency_p95_ms=float(payload.get("latency_p95_ms", 0.0)),
+            error_rate_percent=float(payload.get("error_rate_percent", 0.0)),
+            components={
+                str(key): str(value)
+                for key, value in dict(payload.get("components", {})).items()
+            },
+            message=(
+                None
+                if payload.get("message") is None
+                else str(payload.get("message"))
+            ),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_status_sla_target_response(payload: dict[str, Any]) -> StatusSLATargetResponse:
+        return StatusSLATargetResponse(
+            service_id=str(payload.get("service_id", "")),
+            availability_target_percent=float(payload.get("availability_target_percent", 0.0)),
+            latency_p95_target_ms=float(payload.get("latency_p95_target_ms", 0.0)),
+            error_rate_target_percent=float(payload.get("error_rate_target_percent", 0.0)),
+            window_days=int(payload.get("window_days", 0)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_status_sla_evaluation_response(payload: dict[str, Any]) -> StatusSLAEvaluationResponse:
+        return StatusSLAEvaluationResponse(
+            service_id=str(payload.get("service_id", "")),
+            meets_sla=bool(payload.get("meets_sla", False)),
+            availability_ok=bool(payload.get("availability_ok", False)),
+            latency_ok=bool(payload.get("latency_ok", False)),
+            error_rate_ok=bool(payload.get("error_rate_ok", False)),
+            violations=[
+                str(item)
+                for item in payload.get("violations", [])
+                if isinstance(item, str)
+            ],
+            status=_to_status_service_response(dict(payload.get("status", {}))),
+            target=_to_status_sla_target_response(dict(payload.get("target", {}))),
+            evaluated_at=float(payload.get("evaluated_at", 0.0)),
+        )
+
+    def _upsert_status_service(
+        service_id: str,
+        payload: StatusServiceUpsertRequest,
+    ) -> StatusServiceResponse:
+        try:
+            status = status_portal.upsert_service_status(
+                service_id=service_id,
+                display_name=payload.display_name,
+                status=payload.status,
+                availability_percent=payload.availability_percent,
+                latency_p95_ms=payload.latency_p95_ms,
+                error_rate_percent=payload.error_rate_percent,
+                components=payload.components,
+                message=payload.message,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_status_service_response(status)
+
+    def _list_status_services() -> StatusServiceListResponse:
+        items = [
+            _to_status_service_response(item)
+            for item in status_portal.list_service_statuses()
+        ]
+        return StatusServiceListResponse(items=items, total=len(items))
+
+    def _get_status_service(service_id: str) -> StatusServiceResponse:
+        try:
+            status = status_portal.get_service_status(service_id=service_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if status is None:
+            raise HTTPException(status_code=404, detail="service status not found")
+        return _to_status_service_response(status)
+
+    def _upsert_status_sla_target(
+        service_id: str,
+        payload: StatusSLATargetUpsertRequest,
+    ) -> StatusSLATargetResponse:
+        try:
+            target = status_portal.upsert_sla_target(
+                service_id=service_id,
+                availability_target_percent=payload.availability_target_percent,
+                latency_p95_target_ms=payload.latency_p95_target_ms,
+                error_rate_target_percent=payload.error_rate_target_percent,
+                window_days=payload.window_days,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_status_sla_target_response(target)
+
+    def _list_status_sla_targets() -> StatusSLATargetListResponse:
+        items = [
+            _to_status_sla_target_response(item)
+            for item in status_portal.list_sla_targets()
+        ]
+        return StatusSLATargetListResponse(items=items, total=len(items))
+
+    def _get_status_sla_target(service_id: str) -> StatusSLATargetResponse:
+        try:
+            target = status_portal.get_sla_target(service_id=service_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if target is None:
+            raise HTTPException(status_code=404, detail="sla target not found")
+        return _to_status_sla_target_response(target)
+
+    def _evaluate_status_sla(service_id: str) -> StatusSLAEvaluationResponse:
+        try:
+            evaluation = status_portal.evaluate_sla(service_id=service_id)
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"service status not found", "sla target not found"}:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+        return _to_status_sla_evaluation_response(evaluation)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -7797,6 +8010,239 @@ def create_app() -> FastAPI:
     ) -> PrivacyAnalyticsReportResponse:
         _set_deprecation_headers(response)
         return _get_privacy_analytics_report(report_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/status/services/{{service_id}}",
+        response_model=StatusServiceResponse,
+    )
+    def upsert_status_service_v1(
+        service_id: str,
+        payload: StatusServiceUpsertRequest,
+        request: Request,
+    ) -> StatusServiceResponse:
+        status = _upsert_status_service(service_id, payload)
+        _append_audit_event(
+            request,
+            action="status.portal.service.upsert",
+            resource_type="status_service",
+            resource_id=status.service_id,
+            details={
+                "status": status.status,
+                "availability_percent": status.availability_percent,
+                "latency_p95_ms": status.latency_p95_ms,
+                "error_rate_percent": status.error_rate_percent,
+            },
+        )
+        _publish_realtime_event(
+            event_type="status.portal.service.updated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "service_id": status.service_id,
+                "status": status.status,
+            },
+        )
+        return status
+
+    @app.post(
+        "/status/services/{service_id}",
+        response_model=StatusServiceResponse,
+        deprecated=True,
+    )
+    def upsert_status_service_legacy(
+        service_id: str,
+        payload: StatusServiceUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> StatusServiceResponse:
+        _set_deprecation_headers(response)
+        status = _upsert_status_service(service_id, payload)
+        _append_audit_event(
+            request,
+            action="status.portal.service.upsert",
+            resource_type="status_service",
+            resource_id=status.service_id,
+            details={
+                "status": status.status,
+                "availability_percent": status.availability_percent,
+                "latency_p95_ms": status.latency_p95_ms,
+                "error_rate_percent": status.error_rate_percent,
+            },
+        )
+        _publish_realtime_event(
+            event_type="status.portal.service.updated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "service_id": status.service_id,
+                "status": status.status,
+            },
+        )
+        return status
+
+    @app.get(
+        f"{API_V1_PREFIX}/status/services",
+        response_model=StatusServiceListResponse,
+    )
+    def list_status_services_v1() -> StatusServiceListResponse:
+        return _list_status_services()
+
+    @app.get(
+        "/status/services",
+        response_model=StatusServiceListResponse,
+        deprecated=True,
+    )
+    def list_status_services_legacy(response: Response) -> StatusServiceListResponse:
+        _set_deprecation_headers(response)
+        return _list_status_services()
+
+    @app.get(
+        f"{API_V1_PREFIX}/status/services/{{service_id}}",
+        response_model=StatusServiceResponse,
+    )
+    def get_status_service_v1(service_id: str) -> StatusServiceResponse:
+        return _get_status_service(service_id)
+
+    @app.get(
+        "/status/services/{service_id}",
+        response_model=StatusServiceResponse,
+        deprecated=True,
+    )
+    def get_status_service_legacy(
+        service_id: str,
+        response: Response,
+    ) -> StatusServiceResponse:
+        _set_deprecation_headers(response)
+        return _get_status_service(service_id)
+
+    @app.post(
+        f"{API_V1_PREFIX}/status/sla/{{service_id}}",
+        response_model=StatusSLATargetResponse,
+    )
+    def upsert_status_sla_target_v1(
+        service_id: str,
+        payload: StatusSLATargetUpsertRequest,
+        request: Request,
+    ) -> StatusSLATargetResponse:
+        target = _upsert_status_sla_target(service_id, payload)
+        _append_audit_event(
+            request,
+            action="status.portal.sla.upsert",
+            resource_type="status_sla_target",
+            resource_id=target.service_id,
+            details={
+                "availability_target_percent": target.availability_target_percent,
+                "latency_p95_target_ms": target.latency_p95_target_ms,
+                "error_rate_target_percent": target.error_rate_target_percent,
+                "window_days": target.window_days,
+            },
+        )
+        return target
+
+    @app.post(
+        "/status/sla/{service_id}",
+        response_model=StatusSLATargetResponse,
+        deprecated=True,
+    )
+    def upsert_status_sla_target_legacy(
+        service_id: str,
+        payload: StatusSLATargetUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> StatusSLATargetResponse:
+        _set_deprecation_headers(response)
+        target = _upsert_status_sla_target(service_id, payload)
+        _append_audit_event(
+            request,
+            action="status.portal.sla.upsert",
+            resource_type="status_sla_target",
+            resource_id=target.service_id,
+            details={
+                "availability_target_percent": target.availability_target_percent,
+                "latency_p95_target_ms": target.latency_p95_target_ms,
+                "error_rate_target_percent": target.error_rate_target_percent,
+                "window_days": target.window_days,
+            },
+        )
+        return target
+
+    @app.get(
+        f"{API_V1_PREFIX}/status/sla",
+        response_model=StatusSLATargetListResponse,
+    )
+    def list_status_sla_targets_v1() -> StatusSLATargetListResponse:
+        return _list_status_sla_targets()
+
+    @app.get(
+        "/status/sla",
+        response_model=StatusSLATargetListResponse,
+        deprecated=True,
+    )
+    def list_status_sla_targets_legacy(response: Response) -> StatusSLATargetListResponse:
+        _set_deprecation_headers(response)
+        return _list_status_sla_targets()
+
+    @app.get(
+        f"{API_V1_PREFIX}/status/sla/{{service_id}}",
+        response_model=StatusSLATargetResponse,
+    )
+    def get_status_sla_target_v1(service_id: str) -> StatusSLATargetResponse:
+        return _get_status_sla_target(service_id)
+
+    @app.get(
+        "/status/sla/{service_id}",
+        response_model=StatusSLATargetResponse,
+        deprecated=True,
+    )
+    def get_status_sla_target_legacy(
+        service_id: str,
+        response: Response,
+    ) -> StatusSLATargetResponse:
+        _set_deprecation_headers(response)
+        return _get_status_sla_target(service_id)
+
+    @app.get(
+        f"{API_V1_PREFIX}/status/sla/{{service_id}}/evaluate",
+        response_model=StatusSLAEvaluationResponse,
+    )
+    def evaluate_status_sla_v1(
+        service_id: str,
+        request: Request,
+    ) -> StatusSLAEvaluationResponse:
+        evaluation = _evaluate_status_sla(service_id)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="status_portal_sla_evaluate", units=1.0)
+        _publish_realtime_event(
+            event_type="status.portal.sla.evaluated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "service_id": evaluation.service_id,
+                "meets_sla": evaluation.meets_sla,
+                "violations": evaluation.violations,
+            },
+        )
+        return evaluation
+
+    @app.get(
+        "/status/sla/{service_id}/evaluate",
+        response_model=StatusSLAEvaluationResponse,
+        deprecated=True,
+    )
+    def evaluate_status_sla_legacy(
+        service_id: str,
+        response: Response,
+        request: Request,
+    ) -> StatusSLAEvaluationResponse:
+        _set_deprecation_headers(response)
+        evaluation = _evaluate_status_sla(service_id)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="status_portal_sla_evaluate", units=1.0)
+        _publish_realtime_event(
+            event_type="status.portal.sla.evaluated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "service_id": evaluation.service_id,
+                "meets_sla": evaluation.meets_sla,
+                "violations": evaluation.violations,
+            },
+        )
+        return evaluation
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:

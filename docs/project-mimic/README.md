@@ -73,6 +73,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/57-autonomous-remediation-actions-for-known-failure-signatures.md`
   - `lld/58-policy-verification-tooling-for-rule-conflict-safety.md`
   - `lld/59-privacy-preserving-analytics-layer-for-tenant-reporting.md`
+  - `lld/60-customer-facing-sla-and-status-portal.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
