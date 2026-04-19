@@ -22,6 +22,11 @@ from pydantic import ConfigDict, Field
 
 from .error_mapping import map_exception_to_error
 from .audit_export import build_audit_export_sink_from_env
+from .autonomous_remediation import (
+    AutonomousRemediationService,
+    InMemoryAutonomousRemediationStore,
+    JsonFileAutonomousRemediationStore,
+)
 from .billing import BillingPrimitives, InMemoryBillingStore, JsonFileBillingStore
 from .cost_aware_scheduler import (
     CostAwareScheduler,
@@ -836,6 +841,78 @@ class PredictiveAutoscalingRecommendationResponse(APIPayloadModel):
     evaluated_at: float
 
 
+class RemediationActionPlanItem(APIPayloadModel):
+    action_type: str
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class RemediationActionResult(APIPayloadModel):
+    action_type: str
+    success: bool
+    status: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class AutonomousRemediationSignatureUpsertRequest(APIPayloadModel):
+    incident_class: str
+    failure_code: str | None = None
+    threshold: float = Field(ge=0.0)
+    cooldown_seconds: int = Field(default=0, ge=0)
+    enabled: bool = True
+    action_plan: list[RemediationActionPlanItem] = Field(default_factory=list)
+
+
+class AutonomousRemediationSignatureResponse(APIPayloadModel):
+    signature_id: str
+    tenant_id: str
+    incident_class: str
+    failure_code: str | None = None
+    threshold: float
+    cooldown_seconds: int
+    enabled: bool
+    action_plan: list[RemediationActionPlanItem] = Field(default_factory=list)
+    last_triggered_at: float | None = None
+    created_at: float
+    updated_at: float
+
+
+class AutonomousRemediationSignatureListResponse(APIPayloadModel):
+    items: list[AutonomousRemediationSignatureResponse]
+    total: int
+
+
+class AutonomousRemediationTriggerRequest(APIPayloadModel):
+    signature_id: str
+    observed_value: float = Field(ge=0.0)
+    signal_label: str
+    execute: bool = True
+    tenant_id: str | None = None
+    context: dict[str, Any] = Field(default_factory=dict)
+
+
+class AutonomousRemediationExecutionResponse(APIPayloadModel):
+    execution_id: str
+    signature_id: str
+    tenant_id: str
+    incident_class: str
+    failure_code: str | None = None
+    observed_value: float
+    threshold: float
+    matched: bool
+    executed: bool
+    reason: str
+    initiated_by: str
+    signal_label: str
+    action_results: list[RemediationActionResult] = Field(default_factory=list)
+    context: dict[str, Any] = Field(default_factory=dict)
+    created_at: float
+
+
+class AutonomousRemediationExecutionListResponse(APIPayloadModel):
+    items: list[AutonomousRemediationExecutionResponse]
+    total: int
+
+
 class GovernancePolicyUpsertRequest(APIPayloadModel):
     consent_required: bool = False
     allowed_target_patterns: list[str] = Field(default_factory=list)
@@ -1051,6 +1128,8 @@ def create_app() -> FastAPI:
     cost_aware_scheduler_file_path = os.getenv("COST_AWARE_SCHEDULER_FILE_PATH", "")
     predictive_autoscaling_store_type = os.getenv("PREDICTIVE_AUTOSCALING_STORE", "memory").strip().lower()
     predictive_autoscaling_file_path = os.getenv("PREDICTIVE_AUTOSCALING_FILE_PATH", "")
+    autonomous_remediation_store_type = os.getenv("AUTONOMOUS_REMEDIATION_STORE", "memory").strip().lower()
+    autonomous_remediation_file_path = os.getenv("AUTONOMOUS_REMEDIATION_FILE_PATH", "")
     billing_store_type = os.getenv("BILLING_STORE", "memory").strip().lower()
     billing_file_path = os.getenv("BILLING_FILE_PATH", "")
     billing_enforcement_enabled = os.getenv("BILLING_ENFORCEMENT_ENABLED", "false").strip().lower() in {
@@ -1250,6 +1329,15 @@ def create_app() -> FastAPI:
     else:
         predictive_autoscaling_store = InMemoryPredictiveAutoscalingStore()
 
+    if autonomous_remediation_store_type == "file":
+        if not autonomous_remediation_file_path:
+            raise RuntimeError(
+                "AUTONOMOUS_REMEDIATION_FILE_PATH is required when AUTONOMOUS_REMEDIATION_STORE=file"
+            )
+        autonomous_remediation_store = JsonFileAutonomousRemediationStore(autonomous_remediation_file_path)
+    else:
+        autonomous_remediation_store = InMemoryAutonomousRemediationStore()
+
     if billing_store_type == "file":
         if not billing_file_path:
             raise RuntimeError("BILLING_FILE_PATH is required when BILLING_STORE=file")
@@ -1319,6 +1407,105 @@ def create_app() -> FastAPI:
     usage_metering = TenantUsageMetering(store=usage_metering_store)
     cost_aware_scheduler = CostAwareScheduler(store=cost_aware_scheduler_store)
     predictive_autoscaling = PredictiveAutoscalingService(store=predictive_autoscaling_store)
+
+    def _execute_remediation_action(
+        action_type: str,
+        parameters: dict[str, Any],
+        action_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized_action = action_type.strip().lower()
+
+        if normalized_action == "queue.requeue_expired_leases":
+            recovered = async_job_queue.requeue_expired_leases()
+            return {
+                "success": True,
+                "status": "succeeded",
+                "details": {"recovered_leases": int(recovered)},
+            }
+
+        if normalized_action == "queue.replay_dead_letter":
+            job_id = str(parameters.get("job_id", "")).strip()
+            if not job_id:
+                dead_letter = async_job_queue.list_dead_letter()
+                if not dead_letter:
+                    return {
+                        "success": False,
+                        "status": "failed",
+                        "details": {"error": "no dead-letter jobs available"},
+                    }
+                job_id = dead_letter[0].job_id
+
+            job = async_job_queue.replay_dead_letter(job_id)
+            return {
+                "success": True,
+                "status": "succeeded",
+                "details": {"job_id": job.job_id, "new_status": job.status.value},
+            }
+
+        if normalized_action == "control_plane.failover_execute":
+            policy_id = str(parameters.get("policy_id", "")).strip()
+            target_region = str(parameters.get("target_region", "")).strip()
+            reason = str(parameters.get("reason", "autonomous_remediation")).strip() or "autonomous_remediation"
+            if not policy_id:
+                raise ValueError("policy_id is required for control_plane.failover_execute")
+            if not target_region:
+                raise ValueError("target_region is required for control_plane.failover_execute")
+
+            signature_id = str(action_context.get("signature_id", "")).strip() or "unknown-signature"
+            status = regional_failover.execute_failover(
+                policy_id=policy_id,
+                target_region=target_region,
+                reason=reason,
+                initiated_by=f"autonomous-remediation:{signature_id}",
+            )
+            return {
+                "success": True,
+                "status": "succeeded",
+                "details": {
+                    "policy_id": status.get("policy_id"),
+                    "active": bool(status.get("active", False)),
+                    "target_region": status.get("target_region"),
+                },
+            }
+
+        if normalized_action == "feature_flag.disable":
+            flag_key = str(parameters.get("flag_key", "")).strip()
+            if not flag_key:
+                raise ValueError("flag_key is required for feature_flag.disable")
+
+            existing = feature_flags.get(flag_key=flag_key)
+            updated = feature_flags.upsert(
+                flag_key=str(existing.get("flag_key", flag_key)),
+                description=str(existing.get("description", "autonomous remediation disabled flag")),
+                enabled=False,
+                rollout_percentage=int(existing.get("rollout_percentage", 0)),
+                tenant_allowlist=[str(item) for item in existing.get("tenant_allowlist", []) if isinstance(item, str)],
+                subject_allowlist=[str(item) for item in existing.get("subject_allowlist", []) if isinstance(item, str)],
+                metadata={
+                    **{
+                        str(key): str(value)
+                        for key, value in dict(existing.get("metadata", {})).items()
+                    },
+                    "disabled_by": "autonomous_remediation",
+                },
+            )
+            return {
+                "success": True,
+                "status": "succeeded",
+                "details": {"flag_key": updated.get("flag_key"), "enabled": bool(updated.get("enabled", False))},
+            }
+
+        return {
+            "success": False,
+            "status": "failed",
+            "details": {"error": f"unsupported remediation action: {normalized_action}"},
+        }
+
+    autonomous_remediation = AutonomousRemediationService(
+        store=autonomous_remediation_store,
+        action_executor=_execute_remediation_action,
+    )
+
     billing = BillingPrimitives(store=billing_store)
     data_residency = TenantDataResidencyPolicyService(store=data_residency_store)
     multi_region_control_plane = MultiRegionControlPlaneService(store=multi_region_control_plane_store)
@@ -1420,6 +1607,12 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/autoscaling/predictive/status") or path.startswith("/autoscaling/predictive/status"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/autoscaling/predictive") or path.startswith("/autoscaling/predictive"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/remediation/autonomous/execute") or path.startswith("/remediation/autonomous/execute"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/remediation/autonomous/executions") or path.startswith("/remediation/autonomous/executions"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/remediation/autonomous") or path.startswith("/remediation/autonomous"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -1866,6 +2059,183 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return _to_predictive_autoscaling_recommendation_response(recommendation)
+
+    def _to_remediation_action_plan_item(payload: dict[str, Any]) -> RemediationActionPlanItem:
+        params_raw = payload.get("parameters", {})
+        params = dict(params_raw) if isinstance(params_raw, dict) else {}
+        return RemediationActionPlanItem(
+            action_type=str(payload.get("action_type", "")),
+            parameters=params,
+        )
+
+    def _to_remediation_action_result(payload: dict[str, Any]) -> RemediationActionResult:
+        details_raw = payload.get("details", {})
+        details = dict(details_raw) if isinstance(details_raw, dict) else {"value": details_raw}
+        return RemediationActionResult(
+            action_type=str(payload.get("action_type", "")),
+            success=bool(payload.get("success", False)),
+            status=str(payload.get("status", "unknown")),
+            details=details,
+        )
+
+    def _to_autonomous_remediation_signature_response(payload: dict[str, Any]) -> AutonomousRemediationSignatureResponse:
+        last_triggered_at_raw = payload.get("last_triggered_at")
+        return AutonomousRemediationSignatureResponse(
+            signature_id=str(payload.get("signature_id", "")),
+            tenant_id=str(payload.get("tenant_id", "")),
+            incident_class=str(payload.get("incident_class", "")),
+            failure_code=(
+                None
+                if payload.get("failure_code") is None
+                else str(payload.get("failure_code"))
+            ),
+            threshold=float(payload.get("threshold", 0.0)),
+            cooldown_seconds=int(payload.get("cooldown_seconds", 0)),
+            enabled=bool(payload.get("enabled", True)),
+            action_plan=[
+                _to_remediation_action_plan_item(item)
+                for item in payload.get("action_plan", [])
+                if isinstance(item, dict)
+            ],
+            last_triggered_at=(None if last_triggered_at_raw is None else float(last_triggered_at_raw)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_autonomous_remediation_execution_response(payload: dict[str, Any]) -> AutonomousRemediationExecutionResponse:
+        context_raw = payload.get("context", {})
+        context = dict(context_raw) if isinstance(context_raw, dict) else {}
+        return AutonomousRemediationExecutionResponse(
+            execution_id=str(payload.get("execution_id", "")),
+            signature_id=str(payload.get("signature_id", "")),
+            tenant_id=str(payload.get("tenant_id", "")),
+            incident_class=str(payload.get("incident_class", "")),
+            failure_code=(
+                None
+                if payload.get("failure_code") is None
+                else str(payload.get("failure_code"))
+            ),
+            observed_value=float(payload.get("observed_value", 0.0)),
+            threshold=float(payload.get("threshold", 0.0)),
+            matched=bool(payload.get("matched", False)),
+            executed=bool(payload.get("executed", False)),
+            reason=str(payload.get("reason", "")),
+            initiated_by=str(payload.get("initiated_by", "")),
+            signal_label=str(payload.get("signal_label", "")),
+            action_results=[
+                _to_remediation_action_result(item)
+                for item in payload.get("action_results", [])
+                if isinstance(item, dict)
+            ],
+            context=context,
+            created_at=float(payload.get("created_at", 0.0)),
+        )
+
+    def _upsert_autonomous_remediation_signature(
+        signature_id: str,
+        payload: AutonomousRemediationSignatureUpsertRequest,
+        request: Request,
+    ) -> AutonomousRemediationSignatureResponse:
+        action_plan_payload = [
+            {
+                "action_type": item.action_type,
+                "parameters": dict(item.parameters),
+            }
+            for item in payload.action_plan
+        ]
+        try:
+            signature = autonomous_remediation.upsert_signature(
+                signature_id=signature_id,
+                tenant_id=_tenant_id(request),
+                incident_class=payload.incident_class,
+                failure_code=payload.failure_code,
+                threshold=payload.threshold,
+                cooldown_seconds=payload.cooldown_seconds,
+                enabled=payload.enabled,
+                action_plan=action_plan_payload,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_autonomous_remediation_signature_response(signature)
+
+    def _list_autonomous_remediation_signatures(request: Request) -> AutonomousRemediationSignatureListResponse:
+        items = [
+            _to_autonomous_remediation_signature_response(item)
+            for item in autonomous_remediation.list_signatures(tenant_id=_tenant_id(request))
+        ]
+        return AutonomousRemediationSignatureListResponse(items=items, total=len(items))
+
+    def _get_autonomous_remediation_signature(
+        signature_id: str,
+        request: Request,
+    ) -> AutonomousRemediationSignatureResponse:
+        try:
+            signature = autonomous_remediation.get_signature(
+                signature_id=signature_id,
+                tenant_id=_tenant_id(request),
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"signature not found", "signature does not belong to tenant"}:
+                raise HTTPException(status_code=404, detail="autonomous remediation signature not found") from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+        return _to_autonomous_remediation_signature_response(signature)
+
+    def _trigger_autonomous_remediation(
+        payload: AutonomousRemediationTriggerRequest,
+        request: Request,
+    ) -> AutonomousRemediationExecutionResponse:
+        effective_tenant = _resolve_effective_tenant(request, payload.tenant_id)
+        action_plan_context = dict(payload.context)
+        try:
+            execution = autonomous_remediation.trigger(
+                signature_id=payload.signature_id,
+                tenant_id=effective_tenant,
+                observed_value=payload.observed_value,
+                signal_label=payload.signal_label,
+                execute=payload.execute,
+                initiated_by=f"api-key:{getattr(request.state, 'api_key_id', 'unknown')}",
+                context=action_plan_context,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"signature not found", "signature does not belong to tenant"}:
+                raise HTTPException(status_code=404, detail="autonomous remediation signature not found") from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+        return _to_autonomous_remediation_execution_response(execution)
+
+    def _list_autonomous_remediation_executions(
+        request: Request,
+        signature_id: str | None,
+        limit: int,
+    ) -> AutonomousRemediationExecutionListResponse:
+        try:
+            items = [
+                _to_autonomous_remediation_execution_response(item)
+                for item in autonomous_remediation.list_executions(
+                    tenant_id=_tenant_id(request),
+                    signature_id=signature_id,
+                    limit=limit,
+                )
+            ]
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return AutonomousRemediationExecutionListResponse(items=items, total=len(items))
+
+    def _get_autonomous_remediation_execution(
+        execution_id: str,
+        request: Request,
+    ) -> AutonomousRemediationExecutionResponse:
+        try:
+            execution = autonomous_remediation.get_execution(
+                execution_id=execution_id,
+                tenant_id=_tenant_id(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if execution is None:
+            raise HTTPException(status_code=404, detail="autonomous remediation execution not found")
+        return _to_autonomous_remediation_execution_response(execution)
 
     def _to_async_job_response(job: ActionJob) -> AsyncJobResponse:
         return AsyncJobResponse(
@@ -5751,6 +6121,230 @@ def create_app() -> FastAPI:
                 },
             )
         return recommendation
+
+    @app.post(
+        f"{API_V1_PREFIX}/remediation/autonomous/signatures/{{signature_id}}",
+        response_model=AutonomousRemediationSignatureResponse,
+    )
+    def upsert_autonomous_remediation_signature_v1(
+        signature_id: str,
+        payload: AutonomousRemediationSignatureUpsertRequest,
+        request: Request,
+    ) -> AutonomousRemediationSignatureResponse:
+        signature = _upsert_autonomous_remediation_signature(signature_id, payload, request)
+        _append_audit_event(
+            request,
+            action="remediation.autonomous.signature.upsert",
+            resource_type="autonomous_remediation_signature",
+            resource_id=signature.signature_id,
+            details={
+                "incident_class": signature.incident_class,
+                "threshold": signature.threshold,
+                "enabled": signature.enabled,
+            },
+        )
+        return signature
+
+    @app.post(
+        "/remediation/autonomous/signatures/{signature_id}",
+        response_model=AutonomousRemediationSignatureResponse,
+        deprecated=True,
+    )
+    def upsert_autonomous_remediation_signature_legacy(
+        signature_id: str,
+        payload: AutonomousRemediationSignatureUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> AutonomousRemediationSignatureResponse:
+        _set_deprecation_headers(response)
+        signature = _upsert_autonomous_remediation_signature(signature_id, payload, request)
+        _append_audit_event(
+            request,
+            action="remediation.autonomous.signature.upsert",
+            resource_type="autonomous_remediation_signature",
+            resource_id=signature.signature_id,
+            details={
+                "incident_class": signature.incident_class,
+                "threshold": signature.threshold,
+                "enabled": signature.enabled,
+            },
+        )
+        return signature
+
+    @app.get(
+        f"{API_V1_PREFIX}/remediation/autonomous/signatures",
+        response_model=AutonomousRemediationSignatureListResponse,
+    )
+    def list_autonomous_remediation_signatures_v1(
+        request: Request,
+    ) -> AutonomousRemediationSignatureListResponse:
+        return _list_autonomous_remediation_signatures(request)
+
+    @app.get(
+        "/remediation/autonomous/signatures",
+        response_model=AutonomousRemediationSignatureListResponse,
+        deprecated=True,
+    )
+    def list_autonomous_remediation_signatures_legacy(
+        response: Response,
+        request: Request,
+    ) -> AutonomousRemediationSignatureListResponse:
+        _set_deprecation_headers(response)
+        return _list_autonomous_remediation_signatures(request)
+
+    @app.get(
+        f"{API_V1_PREFIX}/remediation/autonomous/signatures/{{signature_id}}",
+        response_model=AutonomousRemediationSignatureResponse,
+    )
+    def get_autonomous_remediation_signature_v1(
+        signature_id: str,
+        request: Request,
+    ) -> AutonomousRemediationSignatureResponse:
+        return _get_autonomous_remediation_signature(signature_id, request)
+
+    @app.get(
+        "/remediation/autonomous/signatures/{signature_id}",
+        response_model=AutonomousRemediationSignatureResponse,
+        deprecated=True,
+    )
+    def get_autonomous_remediation_signature_legacy(
+        signature_id: str,
+        response: Response,
+        request: Request,
+    ) -> AutonomousRemediationSignatureResponse:
+        _set_deprecation_headers(response)
+        return _get_autonomous_remediation_signature(signature_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/remediation/autonomous/execute",
+        response_model=AutonomousRemediationExecutionResponse,
+    )
+    def trigger_autonomous_remediation_v1(
+        payload: AutonomousRemediationTriggerRequest,
+        request: Request,
+    ) -> AutonomousRemediationExecutionResponse:
+        execution = _trigger_autonomous_remediation(payload, request)
+        _record_usage_metering(
+            tenant_id=execution.tenant_id,
+            dimension="autonomous_remediation_execute",
+            units=1.0,
+        )
+        _append_audit_event(
+            request,
+            action="remediation.autonomous.execute",
+            resource_type="autonomous_remediation_signature",
+            resource_id=execution.signature_id,
+            details={
+                "execution_id": execution.execution_id,
+                "matched": execution.matched,
+                "executed": execution.executed,
+                "reason": execution.reason,
+            },
+        )
+        if execution.executed and execution.reason in {"actions_executed", "actions_partially_failed"}:
+            _publish_realtime_event(
+                event_type="remediation.autonomous.executed",
+                tenant_id=execution.tenant_id,
+                payload={
+                    "execution_id": execution.execution_id,
+                    "signature_id": execution.signature_id,
+                    "incident_class": execution.incident_class,
+                    "reason": execution.reason,
+                    "action_count": len(execution.action_results),
+                },
+            )
+        return execution
+
+    @app.post(
+        "/remediation/autonomous/execute",
+        response_model=AutonomousRemediationExecutionResponse,
+        deprecated=True,
+    )
+    def trigger_autonomous_remediation_legacy(
+        payload: AutonomousRemediationTriggerRequest,
+        response: Response,
+        request: Request,
+    ) -> AutonomousRemediationExecutionResponse:
+        _set_deprecation_headers(response)
+        execution = _trigger_autonomous_remediation(payload, request)
+        _record_usage_metering(
+            tenant_id=execution.tenant_id,
+            dimension="autonomous_remediation_execute",
+            units=1.0,
+        )
+        _append_audit_event(
+            request,
+            action="remediation.autonomous.execute",
+            resource_type="autonomous_remediation_signature",
+            resource_id=execution.signature_id,
+            details={
+                "execution_id": execution.execution_id,
+                "matched": execution.matched,
+                "executed": execution.executed,
+                "reason": execution.reason,
+            },
+        )
+        if execution.executed and execution.reason in {"actions_executed", "actions_partially_failed"}:
+            _publish_realtime_event(
+                event_type="remediation.autonomous.executed",
+                tenant_id=execution.tenant_id,
+                payload={
+                    "execution_id": execution.execution_id,
+                    "signature_id": execution.signature_id,
+                    "incident_class": execution.incident_class,
+                    "reason": execution.reason,
+                    "action_count": len(execution.action_results),
+                },
+            )
+        return execution
+
+    @app.get(
+        f"{API_V1_PREFIX}/remediation/autonomous/executions",
+        response_model=AutonomousRemediationExecutionListResponse,
+    )
+    def list_autonomous_remediation_executions_v1(
+        request: Request,
+        signature_id: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> AutonomousRemediationExecutionListResponse:
+        return _list_autonomous_remediation_executions(request, signature_id, limit)
+
+    @app.get(
+        "/remediation/autonomous/executions",
+        response_model=AutonomousRemediationExecutionListResponse,
+        deprecated=True,
+    )
+    def list_autonomous_remediation_executions_legacy(
+        response: Response,
+        request: Request,
+        signature_id: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> AutonomousRemediationExecutionListResponse:
+        _set_deprecation_headers(response)
+        return _list_autonomous_remediation_executions(request, signature_id, limit)
+
+    @app.get(
+        f"{API_V1_PREFIX}/remediation/autonomous/executions/{{execution_id}}",
+        response_model=AutonomousRemediationExecutionResponse,
+    )
+    def get_autonomous_remediation_execution_v1(
+        execution_id: str,
+        request: Request,
+    ) -> AutonomousRemediationExecutionResponse:
+        return _get_autonomous_remediation_execution(execution_id, request)
+
+    @app.get(
+        "/remediation/autonomous/executions/{execution_id}",
+        response_model=AutonomousRemediationExecutionResponse,
+        deprecated=True,
+    )
+    def get_autonomous_remediation_execution_legacy(
+        execution_id: str,
+        response: Response,
+        request: Request,
+    ) -> AutonomousRemediationExecutionResponse:
+        _set_deprecation_headers(response)
+        return _get_autonomous_remediation_execution(execution_id, request)
 
     @app.post(f"{API_V1_PREFIX}/governance/policies/{{tenant_id}}", response_model=GovernancePolicyResponse)
     def upsert_governance_policy_v1(

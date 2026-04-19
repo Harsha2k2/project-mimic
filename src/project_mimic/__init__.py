@@ -20,6 +20,11 @@ from .audit_export import (
     WebhookAuditExportSink,
     build_audit_export_sink_from_env,
 )
+from .autonomous_remediation import (
+    AutonomousRemediationService,
+    InMemoryAutonomousRemediationStore,
+    JsonFileAutonomousRemediationStore,
+)
 from .benchmarking import BenchmarkReport, BenchmarkTaskResult, run_benchmark
 from .cluster_chaos import ChaosScenario, ClusterChaosTestSuite, REQUIRED_FAULT_CLASSES
 from .cost_aware_scheduler import (
@@ -158,6 +163,7 @@ __all__ = [
     "ArtifactType",
     "ArtifactWriteError",
     "AuditExportSink",
+    "AutonomousRemediationService",
     "AttachSiteTaskRequest",
     "BenchmarkReport",
     "BenchmarkTaskResult",
@@ -203,9 +209,11 @@ __all__ = [
     "InMemorySessionMetadataStore",
     "InvalidSessionTransitionError",
     "InMemoryActionQueue",
+    "InMemoryAutonomousRemediationStore",
     "InMemoryQueueStore",
     "JobStatus",
     "JsonFileQueueStore",
+    "JsonFileAutonomousRemediationStore",
     "ProjectMimicEnv",
     "ProxyEndpoint",
     "ProxyHealthEvent",

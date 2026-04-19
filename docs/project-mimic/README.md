@@ -70,6 +70,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/54-regional-failover-orchestration-with-traffic-control.md`
   - `lld/55-cost-aware-scheduler-for-model-and-worker-routing.md`
   - `lld/56-predictive-autoscaling-based-on-queue-and-latency-trends.md`
+  - `lld/57-autonomous-remediation-actions-for-known-failure-signatures.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
