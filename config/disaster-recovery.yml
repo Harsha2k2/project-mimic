@@ -1,0 +1,2 @@
+archive_path: artifacts/disaster-recovery-backup.tar.gz
+backup_targets: []
