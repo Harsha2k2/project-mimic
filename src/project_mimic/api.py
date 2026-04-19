@@ -22,6 +22,7 @@ from .error_mapping import map_exception_to_error
 from .audit_export import build_audit_export_sink_from_env
 from .engine import ExecutionEngine
 from .event_stream import EventStreamBroker
+from .model_registry import InMemoryModelRegistryStore, JsonFileModelRegistryStore, ModelRegistry
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
 from .queue_runtime import ActionJob, InMemoryActionQueue, JsonFileQueueStore
@@ -308,6 +309,31 @@ class AsyncJobCancelResponse(APIPayloadModel):
     job: AsyncJobResponse
 
 
+class ModelRegisterRequest(APIPayloadModel):
+    model_id: str
+    version: str
+    artifact_uri: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelVersionListResponse(APIPayloadModel):
+    items: list[dict[str, Any]]
+    total: int
+
+
+class ModelPromotionRequest(APIPayloadModel):
+    model_id: str
+    version: str
+
+
+class ModelPromotionResponse(APIPayloadModel):
+    assignment: dict[str, Any]
+
+
+class ModelChannelListResponse(APIPayloadModel):
+    channels: dict[str, dict[str, Any] | None]
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -361,6 +387,8 @@ def create_app() -> FastAPI:
     async_job_queue_store_type = os.getenv("ASYNC_JOB_QUEUE_STORE", "memory").strip().lower()
     async_job_queue_file_path = os.getenv("ASYNC_JOB_QUEUE_FILE_PATH", "")
     async_job_idempotency_ttl_seconds = int(os.getenv("ASYNC_JOB_IDEMPOTENCY_TTL_SECONDS", "3600"))
+    model_registry_store_type = os.getenv("MODEL_REGISTRY_STORE", "memory").strip().lower()
+    model_registry_file_path = os.getenv("MODEL_REGISTRY_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
     webhook_store_type = os.getenv("WEBHOOK_SUBSCRIPTION_STORE", "memory").strip().lower()
     webhook_store_file_path = os.getenv("WEBHOOK_SUBSCRIPTION_FILE_PATH", "")
@@ -471,6 +499,13 @@ def create_app() -> FastAPI:
     else:
         async_job_queue_store = None
 
+    if model_registry_store_type == "file":
+        if not model_registry_file_path:
+            raise RuntimeError("MODEL_REGISTRY_FILE_PATH is required when MODEL_REGISTRY_STORE=file")
+        model_registry_store = JsonFileModelRegistryStore(model_registry_file_path)
+    else:
+        model_registry_store = InMemoryModelRegistryStore()
+
     if webhook_store_type == "file":
         if not webhook_store_file_path:
             raise RuntimeError("WEBHOOK_SUBSCRIPTION_FILE_PATH is required when WEBHOOK_SUBSCRIPTION_STORE=file")
@@ -483,6 +518,7 @@ def create_app() -> FastAPI:
         store=async_job_queue_store,
         idempotency_ttl_seconds=async_job_idempotency_ttl_seconds,
     )
+    model_registry = ModelRegistry(store=model_registry_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
     orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
@@ -507,6 +543,8 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/operator") or path.startswith("/operator"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/events/subscriptions") or path.startswith("/events/subscriptions"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/models/registry") or path.startswith("/models/registry"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/auth/keys") or path.startswith("/auth/keys"):
             return "admin"
@@ -675,6 +713,34 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return AsyncJobCancelResponse(canceled=True, job=_to_async_job_response(job))
+
+    def _register_model_version(payload: ModelRegisterRequest) -> dict[str, Any]:
+        try:
+            return model_registry.register_version(
+                model_id=payload.model_id,
+                version=payload.version,
+                artifact_uri=payload.artifact_uri,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def _list_model_versions(model_id: str | None = None) -> ModelVersionListResponse:
+        items = model_registry.list_versions(model_id=model_id)
+        return ModelVersionListResponse(items=items, total=len(items))
+
+    def _promote_model_channel(channel: str, payload: ModelPromotionRequest) -> ModelPromotionResponse:
+        try:
+            assignment = model_registry.promote(
+                channel=channel,
+                model_id=payload.model_id,
+                version=payload.version,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="model version is not registered") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return ModelPromotionResponse(assignment=assignment)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -1802,6 +1868,91 @@ def create_app() -> FastAPI:
         )
         _set_deprecation_headers(response)
         return response
+
+    @app.post(f"{API_V1_PREFIX}/models/registry/register")
+    def register_model_version_v1(
+        payload: ModelRegisterRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        registered = _register_model_version(payload)
+        _append_audit_event(
+            request,
+            action="model.registry.register",
+            resource_type="model_version",
+            resource_id=f"{registered['model_id']}::{registered['version']}",
+        )
+        return registered
+
+    @app.post("/models/registry/register", deprecated=True)
+    def register_model_version_legacy(
+        payload: ModelRegisterRequest,
+        response: Response,
+        request: Request,
+    ) -> dict[str, Any]:
+        _set_deprecation_headers(response)
+        registered = _register_model_version(payload)
+        _append_audit_event(
+            request,
+            action="model.registry.register",
+            resource_type="model_version",
+            resource_id=f"{registered['model_id']}::{registered['version']}",
+        )
+        return registered
+
+    @app.get(f"{API_V1_PREFIX}/models/registry/versions", response_model=ModelVersionListResponse)
+    def list_model_versions_v1(model_id: str | None = Query(default=None)) -> ModelVersionListResponse:
+        return _list_model_versions(model_id=model_id)
+
+    @app.get("/models/registry/versions", response_model=ModelVersionListResponse, deprecated=True)
+    def list_model_versions_legacy(
+        response: Response,
+        model_id: str | None = Query(default=None),
+    ) -> ModelVersionListResponse:
+        _set_deprecation_headers(response)
+        return _list_model_versions(model_id=model_id)
+
+    @app.post(f"{API_V1_PREFIX}/models/registry/channels/{{channel}}/promote", response_model=ModelPromotionResponse)
+    def promote_model_channel_v1(
+        channel: str,
+        payload: ModelPromotionRequest,
+        request: Request,
+    ) -> ModelPromotionResponse:
+        promoted = _promote_model_channel(channel, payload)
+        _append_audit_event(
+            request,
+            action="model.registry.promote",
+            resource_type="model_channel",
+            resource_id=channel,
+            details=promoted.assignment,
+        )
+        return promoted
+
+    @app.post("/models/registry/channels/{channel}/promote", response_model=ModelPromotionResponse, deprecated=True)
+    def promote_model_channel_legacy(
+        channel: str,
+        payload: ModelPromotionRequest,
+        response: Response,
+        request: Request,
+    ) -> ModelPromotionResponse:
+        _set_deprecation_headers(response)
+        promoted = _promote_model_channel(channel, payload)
+        _append_audit_event(
+            request,
+            action="model.registry.promote",
+            resource_type="model_channel",
+            resource_id=channel,
+            details=promoted.assignment,
+        )
+        return promoted
+
+    @app.get(f"{API_V1_PREFIX}/models/registry/channels", response_model=ModelChannelListResponse)
+    def list_model_channels_v1() -> ModelChannelListResponse:
+        return ModelChannelListResponse(channels=model_registry.list_channels())
+
+    @app.get("/models/registry/channels", response_model=ModelChannelListResponse, deprecated=True)
+    def list_model_channels_legacy(response: Response) -> ModelChannelListResponse:
+        _set_deprecation_headers(response)
+        return ModelChannelListResponse(channels=model_registry.list_channels())
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
