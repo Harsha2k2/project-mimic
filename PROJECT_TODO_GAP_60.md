@@ -55,7 +55,7 @@ Execution rule for this backlog:
 40. [x] Add data residency policy enforcement by tenant and region.
 41. [x] Add consent and allowed-target governance controls.
 42. [x] Add broader browser engine coverage and cross-browser parity tests.
-43. [ ] Add pluggable site-pack packaging/versioning model for strategies.
+43. [x] Add pluggable site-pack packaging/versioning model for strategies.
 44. [ ] Add synthetic monitoring for API, queue, worker, and inference paths.
 45. [ ] Add cluster-level chaos testing (node loss, network partition, storage faults).
 

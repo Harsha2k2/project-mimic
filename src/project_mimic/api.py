@@ -38,6 +38,7 @@ from .governance_controls import (
     JsonFileGovernancePolicyStore,
 )
 from .model_registry import InMemoryModelRegistryStore, JsonFileModelRegistryStore, ModelRegistry
+from .site_pack_registry import InMemorySitePackRegistryStore, JsonFileSitePackRegistryStore, SitePackRegistry
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
 from .policy_explorer import InMemoryPolicyDecisionStore, JsonFilePolicyDecisionStore, PolicyDecisionExplorer
@@ -350,6 +351,37 @@ class ModelPromotionResponse(APIPayloadModel):
 
 class ModelChannelListResponse(APIPayloadModel):
     channels: dict[str, dict[str, Any] | None]
+
+
+class SitePackRegisterRequest(APIPayloadModel):
+    pack_id: str
+    version: str
+    strategy_class: str
+    artifact_uri: str
+    site_ids: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class SitePackVersionListResponse(APIPayloadModel):
+    items: list[dict[str, Any]]
+    total: int
+
+
+class SitePackPromotionRequest(APIPayloadModel):
+    pack_id: str
+    version: str
+
+
+class SitePackPromotionResponse(APIPayloadModel):
+    assignment: dict[str, Any]
+
+
+class SitePackChannelListResponse(APIPayloadModel):
+    channels: dict[str, dict[str, Any] | None]
+
+
+class SitePackRuntimeStrategyMapResponse(APIPayloadModel):
+    mappings: dict[str, str]
 
 
 class FeatureFlagUpsertRequest(APIPayloadModel):
@@ -704,6 +736,15 @@ def create_app() -> FastAPI:
     async_job_idempotency_ttl_seconds = int(os.getenv("ASYNC_JOB_IDEMPOTENCY_TTL_SECONDS", "3600"))
     model_registry_store_type = os.getenv("MODEL_REGISTRY_STORE", "memory").strip().lower()
     model_registry_file_path = os.getenv("MODEL_REGISTRY_FILE_PATH", "")
+    site_pack_registry_store_type = os.getenv("SITE_PACK_REGISTRY_STORE", "memory").strip().lower()
+    site_pack_registry_file_path = os.getenv("SITE_PACK_REGISTRY_FILE_PATH", "")
+    site_pack_active_channel = os.getenv("SITE_PACK_ACTIVE_CHANNEL", "dev").strip().lower() or "dev"
+    site_pack_auto_apply = os.getenv("SITE_PACK_AUTO_APPLY", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     feature_flag_store_type = os.getenv("FEATURE_FLAG_STORE", "memory").strip().lower()
     feature_flag_file_path = os.getenv("FEATURE_FLAG_FILE_PATH", "")
     usage_metering_store_type = os.getenv("USAGE_METERING_STORE", "memory").strip().lower()
@@ -858,6 +899,13 @@ def create_app() -> FastAPI:
     else:
         model_registry_store = InMemoryModelRegistryStore()
 
+    if site_pack_registry_store_type == "file":
+        if not site_pack_registry_file_path:
+            raise RuntimeError("SITE_PACK_REGISTRY_FILE_PATH is required when SITE_PACK_REGISTRY_STORE=file")
+        site_pack_registry_store = JsonFileSitePackRegistryStore(site_pack_registry_file_path)
+    else:
+        site_pack_registry_store = InMemorySitePackRegistryStore()
+
     if feature_flag_store_type == "file":
         if not feature_flag_file_path:
             raise RuntimeError("FEATURE_FLAG_FILE_PATH is required when FEATURE_FLAG_STORE=file")
@@ -920,6 +968,7 @@ def create_app() -> FastAPI:
         idempotency_ttl_seconds=async_job_idempotency_ttl_seconds,
     )
     model_registry = ModelRegistry(store=model_registry_store)
+    site_pack_registry = SitePackRegistry(store=site_pack_registry_store)
     feature_flags = FeatureFlagService(store=feature_flag_store)
     usage_metering = TenantUsageMetering(store=usage_metering_store)
     billing = BillingPrimitives(store=billing_store)
@@ -977,6 +1026,8 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/events/subscriptions") or path.startswith("/events/subscriptions"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/models/registry") or path.startswith("/models/registry"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/site-packs") or path.startswith("/site-packs"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/auth/keys") or path.startswith("/auth/keys"):
             return "admin"
@@ -1173,6 +1224,88 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return ModelPromotionResponse(assignment=assignment)
+
+    def _register_site_pack_version(payload: SitePackRegisterRequest) -> dict[str, Any]:
+        try:
+            return site_pack_registry.register_version(
+                pack_id=payload.pack_id,
+                version=payload.version,
+                strategy_class=payload.strategy_class,
+                artifact_uri=payload.artifact_uri,
+                site_ids=payload.site_ids,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    def _list_site_pack_versions(pack_id: str | None = None) -> SitePackVersionListResponse:
+        items = site_pack_registry.list_versions(pack_id=pack_id)
+        return SitePackVersionListResponse(items=items, total=len(items))
+
+    def _apply_site_pack_assignment(assignment: dict[str, Any]) -> dict[str, Any]:
+        strategy_class = str(assignment.get("strategy_class", "")).strip()
+        if not strategy_class:
+            raise ValueError("strategy_class must not be empty")
+
+        raw_site_ids = assignment.get("site_ids", [])
+        site_ids = [str(item).strip() for item in raw_site_ids if str(item).strip()] if isinstance(raw_site_ids, list) else []
+        if not site_ids:
+            fallback_site = str(assignment.get("pack_id", "")).strip()
+            if fallback_site:
+                site_ids = [fallback_site]
+        if not site_ids:
+            raise ValueError("site_ids must contain at least one site")
+
+        for site_id in site_ids:
+            engine.orchestrator.strategy_registry.register_class(site_id, strategy_class)
+
+        payload = dict(assignment)
+        payload["applied_site_ids"] = site_ids
+        return payload
+
+    def _promote_site_pack_channel(channel: str, payload: SitePackPromotionRequest) -> SitePackPromotionResponse:
+        normalized_channel = channel.strip().lower()
+        try:
+            assignment = site_pack_registry.promote(
+                channel=normalized_channel,
+                pack_id=payload.pack_id,
+                version=payload.version,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="site pack version is not registered") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if site_pack_auto_apply and normalized_channel == site_pack_active_channel:
+            try:
+                assignment = _apply_site_pack_assignment(assignment)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return SitePackPromotionResponse(assignment=assignment)
+
+    def _apply_site_pack_channel(channel: str) -> SitePackPromotionResponse:
+        normalized_channel = channel.strip().lower()
+        assignment = site_pack_registry.list_channels().get(normalized_channel)
+        if assignment is None:
+            raise HTTPException(status_code=404, detail="site pack channel assignment not found")
+
+        try:
+            applied = _apply_site_pack_assignment(assignment)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return SitePackPromotionResponse(assignment=applied)
+
+    def _site_pack_runtime_mapping() -> SitePackRuntimeStrategyMapResponse:
+        return SitePackRuntimeStrategyMapResponse(mappings=engine.orchestrator.strategy_registry.strategy_mapping())
+
+    if site_pack_auto_apply:
+        active_assignment = site_pack_registry.list_channels().get(site_pack_active_channel)
+        if isinstance(active_assignment, dict):
+            try:
+                _apply_site_pack_assignment(active_assignment)
+            except ValueError:
+                pass
 
     def _to_feature_flag_response(payload: dict[str, Any]) -> FeatureFlagResponse:
         return FeatureFlagResponse(
@@ -3230,6 +3363,185 @@ def create_app() -> FastAPI:
     def list_model_channels_legacy(response: Response) -> ModelChannelListResponse:
         _set_deprecation_headers(response)
         return ModelChannelListResponse(channels=model_registry.list_channels())
+
+    @app.post(f"{API_V1_PREFIX}/site-packs/register")
+    def register_site_pack_version_v1(
+        payload: SitePackRegisterRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        registered = _register_site_pack_version(payload)
+        _append_audit_event(
+            request,
+            action="site_pack.registry.register",
+            resource_type="site_pack_version",
+            resource_id=f"{registered['pack_id']}::{registered['version']}",
+        )
+        _publish_realtime_event(
+            event_type="site_pack.registry.registered",
+            tenant_id=_tenant_id(request),
+            payload={
+                "pack_id": registered["pack_id"],
+                "version": registered["version"],
+                "strategy_class": registered["strategy_class"],
+            },
+        )
+        return registered
+
+    @app.post("/site-packs/register", deprecated=True)
+    def register_site_pack_version_legacy(
+        payload: SitePackRegisterRequest,
+        response: Response,
+        request: Request,
+    ) -> dict[str, Any]:
+        _set_deprecation_headers(response)
+        registered = _register_site_pack_version(payload)
+        _append_audit_event(
+            request,
+            action="site_pack.registry.register",
+            resource_type="site_pack_version",
+            resource_id=f"{registered['pack_id']}::{registered['version']}",
+        )
+        _publish_realtime_event(
+            event_type="site_pack.registry.registered",
+            tenant_id=_tenant_id(request),
+            payload={
+                "pack_id": registered["pack_id"],
+                "version": registered["version"],
+                "strategy_class": registered["strategy_class"],
+            },
+        )
+        return registered
+
+    @app.get(f"{API_V1_PREFIX}/site-packs/versions", response_model=SitePackVersionListResponse)
+    def list_site_pack_versions_v1(pack_id: str | None = Query(default=None)) -> SitePackVersionListResponse:
+        return _list_site_pack_versions(pack_id=pack_id)
+
+    @app.get("/site-packs/versions", response_model=SitePackVersionListResponse, deprecated=True)
+    def list_site_pack_versions_legacy(
+        response: Response,
+        pack_id: str | None = Query(default=None),
+    ) -> SitePackVersionListResponse:
+        _set_deprecation_headers(response)
+        return _list_site_pack_versions(pack_id=pack_id)
+
+    @app.post(f"{API_V1_PREFIX}/site-packs/channels/{{channel}}/promote", response_model=SitePackPromotionResponse)
+    def promote_site_pack_channel_v1(
+        channel: str,
+        payload: SitePackPromotionRequest,
+        request: Request,
+    ) -> SitePackPromotionResponse:
+        promoted = _promote_site_pack_channel(channel, payload)
+        _append_audit_event(
+            request,
+            action="site_pack.registry.promote",
+            resource_type="site_pack_channel",
+            resource_id=channel,
+            details=promoted.assignment,
+        )
+        _publish_realtime_event(
+            event_type="site_pack.registry.promoted",
+            tenant_id=_tenant_id(request),
+            payload={
+                "channel": promoted.assignment.get("channel", channel),
+                "pack_id": promoted.assignment.get("pack_id", payload.pack_id),
+                "version": promoted.assignment.get("version", payload.version),
+            },
+        )
+        return promoted
+
+    @app.post("/site-packs/channels/{channel}/promote", response_model=SitePackPromotionResponse, deprecated=True)
+    def promote_site_pack_channel_legacy(
+        channel: str,
+        payload: SitePackPromotionRequest,
+        response: Response,
+        request: Request,
+    ) -> SitePackPromotionResponse:
+        _set_deprecation_headers(response)
+        promoted = _promote_site_pack_channel(channel, payload)
+        _append_audit_event(
+            request,
+            action="site_pack.registry.promote",
+            resource_type="site_pack_channel",
+            resource_id=channel,
+            details=promoted.assignment,
+        )
+        _publish_realtime_event(
+            event_type="site_pack.registry.promoted",
+            tenant_id=_tenant_id(request),
+            payload={
+                "channel": promoted.assignment.get("channel", channel),
+                "pack_id": promoted.assignment.get("pack_id", payload.pack_id),
+                "version": promoted.assignment.get("version", payload.version),
+            },
+        )
+        return promoted
+
+    @app.post(f"{API_V1_PREFIX}/site-packs/channels/{{channel}}/apply", response_model=SitePackPromotionResponse)
+    def apply_site_pack_channel_v1(channel: str, request: Request) -> SitePackPromotionResponse:
+        applied = _apply_site_pack_channel(channel)
+        _append_audit_event(
+            request,
+            action="site_pack.registry.apply",
+            resource_type="site_pack_channel",
+            resource_id=channel,
+            details=applied.assignment,
+        )
+        _publish_realtime_event(
+            event_type="site_pack.registry.applied",
+            tenant_id=_tenant_id(request),
+            payload={
+                "channel": applied.assignment.get("channel", channel),
+                "pack_id": applied.assignment.get("pack_id"),
+                "version": applied.assignment.get("version"),
+                "applied_site_ids": applied.assignment.get("applied_site_ids", []),
+            },
+        )
+        return applied
+
+    @app.post("/site-packs/channels/{channel}/apply", response_model=SitePackPromotionResponse, deprecated=True)
+    def apply_site_pack_channel_legacy(
+        channel: str,
+        response: Response,
+        request: Request,
+    ) -> SitePackPromotionResponse:
+        _set_deprecation_headers(response)
+        applied = _apply_site_pack_channel(channel)
+        _append_audit_event(
+            request,
+            action="site_pack.registry.apply",
+            resource_type="site_pack_channel",
+            resource_id=channel,
+            details=applied.assignment,
+        )
+        _publish_realtime_event(
+            event_type="site_pack.registry.applied",
+            tenant_id=_tenant_id(request),
+            payload={
+                "channel": applied.assignment.get("channel", channel),
+                "pack_id": applied.assignment.get("pack_id"),
+                "version": applied.assignment.get("version"),
+                "applied_site_ids": applied.assignment.get("applied_site_ids", []),
+            },
+        )
+        return applied
+
+    @app.get(f"{API_V1_PREFIX}/site-packs/channels", response_model=SitePackChannelListResponse)
+    def list_site_pack_channels_v1() -> SitePackChannelListResponse:
+        return SitePackChannelListResponse(channels=site_pack_registry.list_channels())
+
+    @app.get("/site-packs/channels", response_model=SitePackChannelListResponse, deprecated=True)
+    def list_site_pack_channels_legacy(response: Response) -> SitePackChannelListResponse:
+        _set_deprecation_headers(response)
+        return SitePackChannelListResponse(channels=site_pack_registry.list_channels())
+
+    @app.get(f"{API_V1_PREFIX}/site-packs/runtime/strategies", response_model=SitePackRuntimeStrategyMapResponse)
+    def list_site_pack_runtime_mapping_v1() -> SitePackRuntimeStrategyMapResponse:
+        return _site_pack_runtime_mapping()
+
+    @app.get("/site-packs/runtime/strategies", response_model=SitePackRuntimeStrategyMapResponse, deprecated=True)
+    def list_site_pack_runtime_mapping_legacy(response: Response) -> SitePackRuntimeStrategyMapResponse:
+        _set_deprecation_headers(response)
+        return _site_pack_runtime_mapping()
 
     @app.post(f"{API_V1_PREFIX}/feature-flags", response_model=FeatureFlagResponse)
     def upsert_feature_flag_v1(

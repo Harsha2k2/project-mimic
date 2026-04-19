@@ -63,6 +63,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/47-data-residency-policy-enforcement-by-tenant-and-region.md`
   - `lld/48-consent-and-allowed-target-governance-controls.md`
   - `lld/49-broader-browser-engine-coverage-and-cross-browser-parity-tests.md`
+  - `lld/50-pluggable-site-pack-packaging-and-versioning-model-for-strategies.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
