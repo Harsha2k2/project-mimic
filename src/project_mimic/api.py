@@ -90,6 +90,11 @@ from .regional_failover import (
     JsonFileRegionalFailoverStore,
     RegionalFailoverOrchestrator,
 )
+from .release_readiness import (
+    InMemoryReleaseReadinessStore,
+    JsonFileReleaseReadinessStore,
+    ReleaseReadinessService,
+)
 from .security import redact_sensitive_structure, redact_sensitive_text
 from .status_portal import (
     CustomerStatusPortalService,
@@ -1608,6 +1613,36 @@ class BenchmarkComparisonRunListResponse(APIPayloadModel):
     total: int
 
 
+class ReleaseReadinessScorecardGenerateRequest(APIPayloadModel):
+    release_id: str
+    generated_by: str
+    ci_evidence: list[dict[str, Any]] = Field(default_factory=list)
+    gate_weights: dict[str, float] = Field(default_factory=dict)
+    minimum_pass_ratio: float = Field(default=0.85, ge=0.0, le=1.0)
+
+
+class ReleaseReadinessScorecardResponse(APIPayloadModel):
+    scorecard_id: str
+    tenant_id: str
+    release_id: str
+    generated_by: str
+    score: float
+    pass_ratio: float
+    minimum_pass_ratio: float
+    overall_status: str
+    release_blocked: bool
+    critical_failure_count: int
+    blocked_reasons: list[str] = Field(default_factory=list)
+    gate_results: list[dict[str, Any]] = Field(default_factory=list)
+    created_at: float
+    updated_at: float
+
+
+class ReleaseReadinessScorecardListResponse(APIPayloadModel):
+    items: list[ReleaseReadinessScorecardResponse]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1731,6 +1766,8 @@ def create_app() -> FastAPI:
     workflow_marketplace_file_path = os.getenv("WORKFLOW_MARKETPLACE_FILE_PATH", "")
     benchmark_lab_store_type = os.getenv("BENCHMARK_LAB_STORE", "memory").strip().lower()
     benchmark_lab_file_path = os.getenv("BENCHMARK_LAB_FILE_PATH", "")
+    release_readiness_store_type = os.getenv("RELEASE_READINESS_STORE", "memory").strip().lower()
+    release_readiness_file_path = os.getenv("RELEASE_READINESS_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -1997,6 +2034,13 @@ def create_app() -> FastAPI:
     else:
         benchmark_lab_store = InMemoryBenchmarkLabStore()
 
+    if release_readiness_store_type == "file":
+        if not release_readiness_file_path:
+            raise RuntimeError("RELEASE_READINESS_FILE_PATH is required when RELEASE_READINESS_STORE=file")
+        release_readiness_store = JsonFileReleaseReadinessStore(release_readiness_file_path)
+    else:
+        release_readiness_store = InMemoryReleaseReadinessStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -2145,6 +2189,7 @@ def create_app() -> FastAPI:
     partner_integrations = PartnerIntegrationService(store=managed_connector_store)
     workflow_marketplace = WorkflowMarketplaceService(store=workflow_marketplace_store)
     benchmark_lab = BenchmarkLabService(store=benchmark_lab_store)
+    release_readiness = ReleaseReadinessService(store=release_readiness_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -2287,6 +2332,8 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/benchmarks/lab/runs") or path.startswith("/benchmarks/lab/runs"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/benchmarks/lab") or path.startswith("/benchmarks/lab"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/release/readiness") or path.startswith("/release/readiness"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -5294,6 +5341,84 @@ def create_app() -> FastAPI:
         if run is None:
             raise HTTPException(status_code=404, detail="benchmark run not found")
         return _to_benchmark_run_response(run)
+
+    def _to_release_readiness_response(payload: dict[str, Any]) -> ReleaseReadinessScorecardResponse:
+        return ReleaseReadinessScorecardResponse(
+            scorecard_id=str(payload.get("scorecard_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            release_id=str(payload.get("release_id", "")),
+            generated_by=str(payload.get("generated_by", "")),
+            score=float(payload.get("score", 0.0)),
+            pass_ratio=float(payload.get("pass_ratio", 0.0)),
+            minimum_pass_ratio=float(payload.get("minimum_pass_ratio", 0.0)),
+            overall_status=str(payload.get("overall_status", "unknown")),
+            release_blocked=bool(payload.get("release_blocked", False)),
+            critical_failure_count=int(payload.get("critical_failure_count", 0)),
+            blocked_reasons=[
+                str(item)
+                for item in payload.get("blocked_reasons", [])
+                if isinstance(item, str)
+            ],
+            gate_results=[
+                dict(item)
+                for item in payload.get("gate_results", [])
+                if isinstance(item, dict)
+            ],
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _generate_release_readiness_scorecard(
+        scorecard_id: str,
+        payload: ReleaseReadinessScorecardGenerateRequest,
+        request: Request,
+    ) -> ReleaseReadinessScorecardResponse:
+        try:
+            scorecard = release_readiness.generate_scorecard(
+                tenant_id=_tenant_id(request),
+                scorecard_id=scorecard_id,
+                release_id=payload.release_id,
+                generated_by=payload.generated_by,
+                ci_evidence=payload.ci_evidence,
+                gate_weights=payload.gate_weights,
+                minimum_pass_ratio=payload.minimum_pass_ratio,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_release_readiness_response(scorecard)
+
+    def _list_release_readiness_scorecards(
+        request: Request,
+        release_id: str | None,
+        status: str | None,
+        limit: int,
+    ) -> ReleaseReadinessScorecardListResponse:
+        try:
+            scorecards = release_readiness.list_scorecards(
+                tenant_id=_tenant_id(request),
+                release_id=release_id,
+                status=status,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_release_readiness_response(item) for item in scorecards]
+        return ReleaseReadinessScorecardListResponse(items=items, total=len(items))
+
+    def _get_release_readiness_scorecard(
+        scorecard_id: str,
+        request: Request,
+    ) -> ReleaseReadinessScorecardResponse:
+        try:
+            scorecard = release_readiness.get_scorecard(scorecard_id=scorecard_id, tenant_id=_tenant_id(request))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if scorecard is None:
+            raise HTTPException(status_code=404, detail="release readiness scorecard not found")
+        return _to_release_readiness_response(scorecard)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -10245,6 +10370,125 @@ def create_app() -> FastAPI:
     ) -> BenchmarkComparisonRunResponse:
         _set_deprecation_headers(response)
         return _get_benchmark_run(run_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/release/readiness/scorecards/{{scorecard_id}}",
+        response_model=ReleaseReadinessScorecardResponse,
+    )
+    def generate_release_readiness_scorecard_v1(
+        scorecard_id: str,
+        payload: ReleaseReadinessScorecardGenerateRequest,
+        request: Request,
+    ) -> ReleaseReadinessScorecardResponse:
+        scorecard = _generate_release_readiness_scorecard(scorecard_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="release_readiness_scorecard", units=1.0)
+        _append_audit_event(
+            request,
+            action="release.readiness.scorecard.generate",
+            resource_type="release_readiness_scorecard",
+            resource_id=scorecard.scorecard_id,
+            details={
+                "release_id": scorecard.release_id,
+                "overall_status": scorecard.overall_status,
+                "release_blocked": scorecard.release_blocked,
+            },
+        )
+        _publish_realtime_event(
+            event_type="release.readiness.scorecard.generated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "scorecard_id": scorecard.scorecard_id,
+                "release_id": scorecard.release_id,
+                "overall_status": scorecard.overall_status,
+            },
+        )
+        return scorecard
+
+    @app.post(
+        "/release/readiness/scorecards/{scorecard_id}",
+        response_model=ReleaseReadinessScorecardResponse,
+        deprecated=True,
+    )
+    def generate_release_readiness_scorecard_legacy(
+        scorecard_id: str,
+        payload: ReleaseReadinessScorecardGenerateRequest,
+        response: Response,
+        request: Request,
+    ) -> ReleaseReadinessScorecardResponse:
+        _set_deprecation_headers(response)
+        scorecard = _generate_release_readiness_scorecard(scorecard_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="release_readiness_scorecard", units=1.0)
+        _append_audit_event(
+            request,
+            action="release.readiness.scorecard.generate",
+            resource_type="release_readiness_scorecard",
+            resource_id=scorecard.scorecard_id,
+            details={
+                "release_id": scorecard.release_id,
+                "overall_status": scorecard.overall_status,
+                "release_blocked": scorecard.release_blocked,
+            },
+        )
+        _publish_realtime_event(
+            event_type="release.readiness.scorecard.generated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "scorecard_id": scorecard.scorecard_id,
+                "release_id": scorecard.release_id,
+                "overall_status": scorecard.overall_status,
+            },
+        )
+        return scorecard
+
+    @app.get(
+        f"{API_V1_PREFIX}/release/readiness/scorecards",
+        response_model=ReleaseReadinessScorecardListResponse,
+    )
+    def list_release_readiness_scorecards_v1(
+        request: Request,
+        release_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> ReleaseReadinessScorecardListResponse:
+        return _list_release_readiness_scorecards(request, release_id=release_id, status=status, limit=limit)
+
+    @app.get(
+        "/release/readiness/scorecards",
+        response_model=ReleaseReadinessScorecardListResponse,
+        deprecated=True,
+    )
+    def list_release_readiness_scorecards_legacy(
+        response: Response,
+        request: Request,
+        release_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> ReleaseReadinessScorecardListResponse:
+        _set_deprecation_headers(response)
+        return _list_release_readiness_scorecards(request, release_id=release_id, status=status, limit=limit)
+
+    @app.get(
+        f"{API_V1_PREFIX}/release/readiness/scorecards/{{scorecard_id}}",
+        response_model=ReleaseReadinessScorecardResponse,
+    )
+    def get_release_readiness_scorecard_v1(
+        scorecard_id: str,
+        request: Request,
+    ) -> ReleaseReadinessScorecardResponse:
+        return _get_release_readiness_scorecard(scorecard_id, request)
+
+    @app.get(
+        "/release/readiness/scorecards/{scorecard_id}",
+        response_model=ReleaseReadinessScorecardResponse,
+        deprecated=True,
+    )
+    def get_release_readiness_scorecard_legacy(
+        scorecard_id: str,
+        response: Response,
+        request: Request,
+    ) -> ReleaseReadinessScorecardResponse:
+        _set_deprecation_headers(response)
+        return _get_release_readiness_scorecard(scorecard_id, request)
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
