@@ -22,6 +22,11 @@ from .audit_export import (
 )
 from .benchmarking import BenchmarkReport, BenchmarkTaskResult, run_benchmark
 from .cluster_chaos import ChaosScenario, ClusterChaosTestSuite, REQUIRED_FAULT_CLASSES
+from .cost_aware_scheduler import (
+    CostAwareScheduler,
+    InMemoryCostAwareSchedulerStore,
+    JsonFileCostAwareSchedulerStore,
+)
 from .multi_region_control_plane import (
     InMemoryMultiRegionControlPlaneStore,
     JsonFileMultiRegionControlPlaneStore,
@@ -165,6 +170,9 @@ __all__ = [
     "ChaosScenario",
     "ClusterChaosTestSuite",
     "REQUIRED_FAULT_CLASSES",
+    "CostAwareScheduler",
+    "InMemoryCostAwareSchedulerStore",
+    "JsonFileCostAwareSchedulerStore",
     "InMemoryMultiRegionControlPlaneStore",
     "JsonFileMultiRegionControlPlaneStore",
     "MultiRegionControlPlaneService",

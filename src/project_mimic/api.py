@@ -23,6 +23,11 @@ from pydantic import ConfigDict, Field
 from .error_mapping import map_exception_to_error
 from .audit_export import build_audit_export_sink_from_env
 from .billing import BillingPrimitives, InMemoryBillingStore, JsonFileBillingStore
+from .cost_aware_scheduler import (
+    CostAwareScheduler,
+    InMemoryCostAwareSchedulerStore,
+    JsonFileCostAwareSchedulerStore,
+)
 from .data_residency import (
     InMemoryDataResidencyStore,
     JsonFileDataResidencyStore,
@@ -671,6 +676,73 @@ class RegionalFailoverStatusResponse(APIPayloadModel):
     updated_at: float
 
 
+class CostAwareModelProfileUpsertRequest(APIPayloadModel):
+    model_id: str
+    region: str
+    cost_per_1k_tokens: float = Field(ge=0.0)
+    latency_ms: float = Field(ge=0.0)
+    queue_depth: int = Field(ge=0)
+    quality_score: float = Field(ge=0.0, le=1.0)
+
+
+class CostAwareWorkerProfileUpsertRequest(APIPayloadModel):
+    worker_pool: str
+    region: str
+    cost_per_minute: float = Field(ge=0.0)
+    latency_ms: float = Field(ge=0.0)
+    queue_depth: int = Field(ge=0)
+    reliability_score: float = Field(ge=0.0, le=1.0)
+
+
+class CostAwareModelProfileResponse(APIPayloadModel):
+    candidate_id: str
+    model_id: str
+    region: str
+    cost_per_1k_tokens: float
+    latency_ms: float
+    queue_depth: int
+    quality_score: float
+    updated_at: float
+
+
+class CostAwareWorkerProfileResponse(APIPayloadModel):
+    candidate_id: str
+    worker_pool: str
+    region: str
+    cost_per_minute: float
+    latency_ms: float
+    queue_depth: int
+    reliability_score: float
+    updated_at: float
+
+
+class CostAwareModelProfileListResponse(APIPayloadModel):
+    items: list[CostAwareModelProfileResponse]
+    total: int
+
+
+class CostAwareWorkerProfileListResponse(APIPayloadModel):
+    items: list[CostAwareWorkerProfileResponse]
+    total: int
+
+
+class CostAwareScheduleRequest(APIPayloadModel):
+    tenant_id: str | None = None
+    objective: str = "balanced"
+
+
+class CostAwareScheduleDecisionResponse(APIPayloadModel):
+    tenant_id: str
+    objective: str
+    selected_candidate: str
+    route_type: str
+    selected_resource: str
+    region: str
+    score: float
+    routed_at: float
+    rationale: dict[str, float | int]
+
+
 class GovernancePolicyUpsertRequest(APIPayloadModel):
     consent_required: bool = False
     allowed_target_patterns: list[str] = Field(default_factory=list)
@@ -882,6 +954,8 @@ def create_app() -> FastAPI:
     feature_flag_file_path = os.getenv("FEATURE_FLAG_FILE_PATH", "")
     usage_metering_store_type = os.getenv("USAGE_METERING_STORE", "memory").strip().lower()
     usage_metering_file_path = os.getenv("USAGE_METERING_FILE_PATH", "")
+    cost_aware_scheduler_store_type = os.getenv("COST_AWARE_SCHEDULER_STORE", "memory").strip().lower()
+    cost_aware_scheduler_file_path = os.getenv("COST_AWARE_SCHEDULER_FILE_PATH", "")
     billing_store_type = os.getenv("BILLING_STORE", "memory").strip().lower()
     billing_file_path = os.getenv("BILLING_FILE_PATH", "")
     billing_enforcement_enabled = os.getenv("BILLING_ENFORCEMENT_ENABLED", "false").strip().lower() in {
@@ -1065,6 +1139,13 @@ def create_app() -> FastAPI:
     else:
         usage_metering_store = InMemoryUsageMeteringStore()
 
+    if cost_aware_scheduler_store_type == "file":
+        if not cost_aware_scheduler_file_path:
+            raise RuntimeError("COST_AWARE_SCHEDULER_FILE_PATH is required when COST_AWARE_SCHEDULER_STORE=file")
+        cost_aware_scheduler_store = JsonFileCostAwareSchedulerStore(cost_aware_scheduler_file_path)
+    else:
+        cost_aware_scheduler_store = InMemoryCostAwareSchedulerStore()
+
     if billing_store_type == "file":
         if not billing_file_path:
             raise RuntimeError("BILLING_FILE_PATH is required when BILLING_STORE=file")
@@ -1132,6 +1213,7 @@ def create_app() -> FastAPI:
     site_pack_registry = SitePackRegistry(store=site_pack_registry_store)
     feature_flags = FeatureFlagService(store=feature_flag_store)
     usage_metering = TenantUsageMetering(store=usage_metering_store)
+    cost_aware_scheduler = CostAwareScheduler(store=cost_aware_scheduler_store)
     billing = BillingPrimitives(store=billing_store)
     data_residency = TenantDataResidencyPolicyService(store=data_residency_store)
     multi_region_control_plane = MultiRegionControlPlaneService(store=multi_region_control_plane_store)
@@ -1221,6 +1303,10 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/control-plane/failover") or path.startswith("/control-plane/failover"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/control-plane") or path.startswith("/control-plane"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/scheduler/cost-aware/route") or path.startswith("/scheduler/cost-aware/route"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/scheduler/cost-aware") or path.startswith("/scheduler/cost-aware"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -1355,6 +1441,144 @@ def create_app() -> FastAPI:
             active=bool(payload.get("active", True)),
             created_at=float(payload.get("created_at", time.time())),
             updated_at=float(payload.get("updated_at", time.time())),
+        )
+
+    def _to_cost_aware_model_profile_response(payload: dict[str, Any]) -> CostAwareModelProfileResponse:
+        return CostAwareModelProfileResponse(
+            candidate_id=str(payload.get("candidate_id", "")),
+            model_id=str(payload.get("model_id", "")),
+            region=str(payload.get("region", "")),
+            cost_per_1k_tokens=float(payload.get("cost_per_1k_tokens", 0.0)),
+            latency_ms=float(payload.get("latency_ms", 0.0)),
+            queue_depth=int(payload.get("queue_depth", 0)),
+            quality_score=float(payload.get("quality_score", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_cost_aware_worker_profile_response(payload: dict[str, Any]) -> CostAwareWorkerProfileResponse:
+        return CostAwareWorkerProfileResponse(
+            candidate_id=str(payload.get("candidate_id", "")),
+            worker_pool=str(payload.get("worker_pool", "")),
+            region=str(payload.get("region", "")),
+            cost_per_minute=float(payload.get("cost_per_minute", 0.0)),
+            latency_ms=float(payload.get("latency_ms", 0.0)),
+            queue_depth=int(payload.get("queue_depth", 0)),
+            reliability_score=float(payload.get("reliability_score", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _upsert_cost_aware_model_profile(
+        candidate_id: str,
+        payload: CostAwareModelProfileUpsertRequest,
+    ) -> CostAwareModelProfileResponse:
+        try:
+            profile = cost_aware_scheduler.upsert_model_profile(
+                candidate_id=candidate_id,
+                model_id=payload.model_id,
+                region=payload.region,
+                cost_per_1k_tokens=payload.cost_per_1k_tokens,
+                latency_ms=payload.latency_ms,
+                queue_depth=payload.queue_depth,
+                quality_score=payload.quality_score,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_cost_aware_model_profile_response(profile)
+
+    def _upsert_cost_aware_worker_profile(
+        candidate_id: str,
+        payload: CostAwareWorkerProfileUpsertRequest,
+    ) -> CostAwareWorkerProfileResponse:
+        try:
+            profile = cost_aware_scheduler.upsert_worker_profile(
+                candidate_id=candidate_id,
+                worker_pool=payload.worker_pool,
+                region=payload.region,
+                cost_per_minute=payload.cost_per_minute,
+                latency_ms=payload.latency_ms,
+                queue_depth=payload.queue_depth,
+                reliability_score=payload.reliability_score,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_cost_aware_worker_profile_response(profile)
+
+    def _list_cost_aware_model_profiles() -> CostAwareModelProfileListResponse:
+        items = [
+            _to_cost_aware_model_profile_response(item)
+            for item in cost_aware_scheduler.list_model_profiles()
+        ]
+        return CostAwareModelProfileListResponse(items=items, total=len(items))
+
+    def _list_cost_aware_worker_profiles() -> CostAwareWorkerProfileListResponse:
+        items = [
+            _to_cost_aware_worker_profile_response(item)
+            for item in cost_aware_scheduler.list_worker_profiles()
+        ]
+        return CostAwareWorkerProfileListResponse(items=items, total=len(items))
+
+    def _schedule_cost_aware_model(payload: CostAwareScheduleRequest, request: Request) -> CostAwareScheduleDecisionResponse:
+        caller_tenant = _tenant_id(request)
+        requested_tenant = payload.tenant_id.strip() if payload.tenant_id is not None else ""
+        if requested_tenant and requested_tenant != caller_tenant:
+            raise HTTPException(status_code=403, detail="tenant override does not match caller scope")
+
+        resolved_tenant = requested_tenant or caller_tenant
+        try:
+            scheduled = cost_aware_scheduler.schedule_model(
+                tenant_id=resolved_tenant,
+                objective=payload.objective,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        rationale = {
+            str(key): value
+            for key, value in dict(scheduled.get("rationale", {})).items()
+            if isinstance(value, (int, float))
+        }
+        return CostAwareScheduleDecisionResponse(
+            tenant_id=str(scheduled.get("tenant_id", resolved_tenant)),
+            objective=str(scheduled.get("objective", payload.objective)),
+            selected_candidate=str(scheduled.get("selected_candidate", "")),
+            route_type="model",
+            selected_resource=str(scheduled.get("model_id", "")),
+            region=str(scheduled.get("region", "")),
+            score=float(scheduled.get("score", 0.0)),
+            routed_at=float(scheduled.get("routed_at", time.time())),
+            rationale=rationale,
+        )
+
+    def _schedule_cost_aware_worker(payload: CostAwareScheduleRequest, request: Request) -> CostAwareScheduleDecisionResponse:
+        caller_tenant = _tenant_id(request)
+        requested_tenant = payload.tenant_id.strip() if payload.tenant_id is not None else ""
+        if requested_tenant and requested_tenant != caller_tenant:
+            raise HTTPException(status_code=403, detail="tenant override does not match caller scope")
+
+        resolved_tenant = requested_tenant or caller_tenant
+        try:
+            scheduled = cost_aware_scheduler.schedule_worker(
+                tenant_id=resolved_tenant,
+                objective=payload.objective,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        rationale = {
+            str(key): value
+            for key, value in dict(scheduled.get("rationale", {})).items()
+            if isinstance(value, (int, float))
+        }
+        return CostAwareScheduleDecisionResponse(
+            tenant_id=str(scheduled.get("tenant_id", resolved_tenant)),
+            objective=str(scheduled.get("objective", payload.objective)),
+            selected_candidate=str(scheduled.get("selected_candidate", "")),
+            route_type="worker",
+            selected_resource=str(scheduled.get("worker_pool", "")),
+            region=str(scheduled.get("region", "")),
+            score=float(scheduled.get("score", 0.0)),
+            routed_at=float(scheduled.get("routed_at", time.time())),
+            rationale=rationale,
         )
 
     def _to_async_job_response(job: ActionJob) -> AsyncJobResponse:
@@ -4808,6 +5032,214 @@ def create_app() -> FastAPI:
     ) -> RegionalFailoverStatusResponse:
         _set_deprecation_headers(response)
         return _regional_failover_status(policy_id)
+
+    @app.post(
+        f"{API_V1_PREFIX}/scheduler/cost-aware/models/{{candidate_id}}",
+        response_model=CostAwareModelProfileResponse,
+    )
+    def upsert_cost_aware_model_profile_v1(
+        candidate_id: str,
+        payload: CostAwareModelProfileUpsertRequest,
+        request: Request,
+    ) -> CostAwareModelProfileResponse:
+        profile = _upsert_cost_aware_model_profile(candidate_id, payload)
+        _append_audit_event(
+            request,
+            action="scheduler.cost_aware.model_profile.upsert",
+            resource_type="scheduler_cost_aware_model_profile",
+            resource_id=profile.candidate_id,
+            details={
+                "model_id": profile.model_id,
+                "region": profile.region,
+            },
+        )
+        return profile
+
+    @app.post(
+        "/scheduler/cost-aware/models/{candidate_id}",
+        response_model=CostAwareModelProfileResponse,
+        deprecated=True,
+    )
+    def upsert_cost_aware_model_profile_legacy(
+        candidate_id: str,
+        payload: CostAwareModelProfileUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> CostAwareModelProfileResponse:
+        _set_deprecation_headers(response)
+        profile = _upsert_cost_aware_model_profile(candidate_id, payload)
+        _append_audit_event(
+            request,
+            action="scheduler.cost_aware.model_profile.upsert",
+            resource_type="scheduler_cost_aware_model_profile",
+            resource_id=profile.candidate_id,
+            details={
+                "model_id": profile.model_id,
+                "region": profile.region,
+            },
+        )
+        return profile
+
+    @app.post(
+        f"{API_V1_PREFIX}/scheduler/cost-aware/workers/{{candidate_id}}",
+        response_model=CostAwareWorkerProfileResponse,
+    )
+    def upsert_cost_aware_worker_profile_v1(
+        candidate_id: str,
+        payload: CostAwareWorkerProfileUpsertRequest,
+        request: Request,
+    ) -> CostAwareWorkerProfileResponse:
+        profile = _upsert_cost_aware_worker_profile(candidate_id, payload)
+        _append_audit_event(
+            request,
+            action="scheduler.cost_aware.worker_profile.upsert",
+            resource_type="scheduler_cost_aware_worker_profile",
+            resource_id=profile.candidate_id,
+            details={
+                "worker_pool": profile.worker_pool,
+                "region": profile.region,
+            },
+        )
+        return profile
+
+    @app.post(
+        "/scheduler/cost-aware/workers/{candidate_id}",
+        response_model=CostAwareWorkerProfileResponse,
+        deprecated=True,
+    )
+    def upsert_cost_aware_worker_profile_legacy(
+        candidate_id: str,
+        payload: CostAwareWorkerProfileUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> CostAwareWorkerProfileResponse:
+        _set_deprecation_headers(response)
+        profile = _upsert_cost_aware_worker_profile(candidate_id, payload)
+        _append_audit_event(
+            request,
+            action="scheduler.cost_aware.worker_profile.upsert",
+            resource_type="scheduler_cost_aware_worker_profile",
+            resource_id=profile.candidate_id,
+            details={
+                "worker_pool": profile.worker_pool,
+                "region": profile.region,
+            },
+        )
+        return profile
+
+    @app.get(
+        f"{API_V1_PREFIX}/scheduler/cost-aware/models",
+        response_model=CostAwareModelProfileListResponse,
+    )
+    def list_cost_aware_model_profiles_v1() -> CostAwareModelProfileListResponse:
+        return _list_cost_aware_model_profiles()
+
+    @app.get(
+        "/scheduler/cost-aware/models",
+        response_model=CostAwareModelProfileListResponse,
+        deprecated=True,
+    )
+    def list_cost_aware_model_profiles_legacy(response: Response) -> CostAwareModelProfileListResponse:
+        _set_deprecation_headers(response)
+        return _list_cost_aware_model_profiles()
+
+    @app.get(
+        f"{API_V1_PREFIX}/scheduler/cost-aware/workers",
+        response_model=CostAwareWorkerProfileListResponse,
+    )
+    def list_cost_aware_worker_profiles_v1() -> CostAwareWorkerProfileListResponse:
+        return _list_cost_aware_worker_profiles()
+
+    @app.get(
+        "/scheduler/cost-aware/workers",
+        response_model=CostAwareWorkerProfileListResponse,
+        deprecated=True,
+    )
+    def list_cost_aware_worker_profiles_legacy(response: Response) -> CostAwareWorkerProfileListResponse:
+        _set_deprecation_headers(response)
+        return _list_cost_aware_worker_profiles()
+
+    @app.post(
+        f"{API_V1_PREFIX}/scheduler/cost-aware/route/model",
+        response_model=CostAwareScheduleDecisionResponse,
+    )
+    def route_cost_aware_model_v1(
+        payload: CostAwareScheduleRequest,
+        request: Request,
+    ) -> CostAwareScheduleDecisionResponse:
+        decision = _schedule_cost_aware_model(payload, request)
+        _record_usage_metering(tenant_id=decision.tenant_id, dimension="cost_aware_route_model", units=1.0)
+        _append_audit_event(
+            request,
+            action="scheduler.cost_aware.model.route",
+            resource_type="scheduler_cost_aware_route",
+            resource_id=decision.selected_candidate,
+            details={"objective": decision.objective, "resource": decision.selected_resource},
+        )
+        return decision
+
+    @app.post(
+        "/scheduler/cost-aware/route/model",
+        response_model=CostAwareScheduleDecisionResponse,
+        deprecated=True,
+    )
+    def route_cost_aware_model_legacy(
+        payload: CostAwareScheduleRequest,
+        response: Response,
+        request: Request,
+    ) -> CostAwareScheduleDecisionResponse:
+        _set_deprecation_headers(response)
+        decision = _schedule_cost_aware_model(payload, request)
+        _record_usage_metering(tenant_id=decision.tenant_id, dimension="cost_aware_route_model", units=1.0)
+        _append_audit_event(
+            request,
+            action="scheduler.cost_aware.model.route",
+            resource_type="scheduler_cost_aware_route",
+            resource_id=decision.selected_candidate,
+            details={"objective": decision.objective, "resource": decision.selected_resource},
+        )
+        return decision
+
+    @app.post(
+        f"{API_V1_PREFIX}/scheduler/cost-aware/route/worker",
+        response_model=CostAwareScheduleDecisionResponse,
+    )
+    def route_cost_aware_worker_v1(
+        payload: CostAwareScheduleRequest,
+        request: Request,
+    ) -> CostAwareScheduleDecisionResponse:
+        decision = _schedule_cost_aware_worker(payload, request)
+        _record_usage_metering(tenant_id=decision.tenant_id, dimension="cost_aware_route_worker", units=1.0)
+        _append_audit_event(
+            request,
+            action="scheduler.cost_aware.worker.route",
+            resource_type="scheduler_cost_aware_route",
+            resource_id=decision.selected_candidate,
+            details={"objective": decision.objective, "resource": decision.selected_resource},
+        )
+        return decision
+
+    @app.post(
+        "/scheduler/cost-aware/route/worker",
+        response_model=CostAwareScheduleDecisionResponse,
+        deprecated=True,
+    )
+    def route_cost_aware_worker_legacy(
+        payload: CostAwareScheduleRequest,
+        response: Response,
+        request: Request,
+    ) -> CostAwareScheduleDecisionResponse:
+        _set_deprecation_headers(response)
+        decision = _schedule_cost_aware_worker(payload, request)
+        _record_usage_metering(tenant_id=decision.tenant_id, dimension="cost_aware_route_worker", units=1.0)
+        _append_audit_event(
+            request,
+            action="scheduler.cost_aware.worker.route",
+            resource_type="scheduler_cost_aware_route",
+            resource_id=decision.selected_candidate,
+            details={"objective": decision.objective, "resource": decision.selected_resource},
+        )
+        return decision
 
     @app.post(f"{API_V1_PREFIX}/governance/policies/{{tenant_id}}", response_model=GovernancePolicyResponse)
     def upsert_governance_policy_v1(

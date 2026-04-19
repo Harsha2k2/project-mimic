@@ -68,6 +68,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/52-cluster-level-chaos-testing-node-network-storage-faults.md`
   - `lld/53-multi-region-active-active-control-plane-architecture.md`
   - `lld/54-regional-failover-orchestration-with-traffic-control.md`
+  - `lld/55-cost-aware-scheduler-for-model-and-worker-routing.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
