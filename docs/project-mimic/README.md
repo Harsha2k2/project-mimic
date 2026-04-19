@@ -79,6 +79,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/63-workflow-marketplace-for-reusable-automation-recipes.md`
   - `lld/64-benchmark-lab-with-reproducible-cross-version-comparisons.md`
   - `lld/65-release-readiness-scorecard-from-ci-evidence.md`
+  - `lld/66-governance-approval-workflows-for-high-risk-policy-changes.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

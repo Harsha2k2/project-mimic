@@ -91,6 +91,11 @@ from .grpc_runtime import (
     VisionServiceHandler,
     build_default_grpc_runtime,
 )
+from .governance_approval import (
+    GovernanceApprovalWorkflowService,
+    InMemoryGovernanceApprovalStore,
+    JsonFileGovernanceApprovalStore,
+)
 from .models import ActionType, ErrorCode, Observation, ProjectMimicModel, Reward, UIAction
 from .mimetic import (
     JitterProfile,
@@ -357,6 +362,9 @@ __all__ = [
     "InMemoryReleaseReadinessStore",
     "JsonFileReleaseReadinessStore",
     "ReleaseReadinessService",
+    "GovernanceApprovalWorkflowService",
+    "InMemoryGovernanceApprovalStore",
+    "JsonFileGovernanceApprovalStore",
     "InMemoryWorkflowMarketplaceStore",
     "JsonFileWorkflowMarketplaceStore",
     "WorkflowMarketplaceService",

@@ -48,6 +48,11 @@ from .governance_controls import (
     InMemoryGovernancePolicyStore,
     JsonFileGovernancePolicyStore,
 )
+from .governance_approval import (
+    GovernanceApprovalWorkflowService,
+    InMemoryGovernanceApprovalStore,
+    JsonFileGovernanceApprovalStore,
+)
 from .identity_federation import (
     EnterpriseIdentityFederationService,
     InMemoryIdentityFederationStore,
@@ -1643,6 +1648,46 @@ class ReleaseReadinessScorecardListResponse(APIPayloadModel):
     total: int
 
 
+class GovernanceApprovalSubmitRequest(APIPayloadModel):
+    policy_id: str
+    change_summary: str
+    risk_score: float = Field(ge=0.0, le=1.0)
+    submitted_by: str
+    required_approvals: int = Field(default=2, ge=1)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class GovernanceApprovalDecisionRequest(APIPayloadModel):
+    approver: str
+    comment: str | None = None
+
+
+class GovernanceApprovalRejectRequest(APIPayloadModel):
+    approver: str
+    reason: str
+
+
+class GovernanceApprovalRequestResponse(APIPayloadModel):
+    request_id: str
+    tenant_id: str
+    policy_id: str
+    change_summary: str
+    risk_score: float
+    submitted_by: str
+    required_approvals: int
+    approvals: list[dict[str, Any]] = Field(default_factory=list)
+    rejections: list[dict[str, Any]] = Field(default_factory=list)
+    status: str
+    metadata: dict[str, str] = Field(default_factory=dict)
+    created_at: float
+    updated_at: float
+
+
+class GovernanceApprovalRequestListResponse(APIPayloadModel):
+    items: list[GovernanceApprovalRequestResponse]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1768,6 +1813,8 @@ def create_app() -> FastAPI:
     benchmark_lab_file_path = os.getenv("BENCHMARK_LAB_FILE_PATH", "")
     release_readiness_store_type = os.getenv("RELEASE_READINESS_STORE", "memory").strip().lower()
     release_readiness_file_path = os.getenv("RELEASE_READINESS_FILE_PATH", "")
+    governance_approval_store_type = os.getenv("GOVERNANCE_APPROVAL_STORE", "memory").strip().lower()
+    governance_approval_file_path = os.getenv("GOVERNANCE_APPROVAL_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -2041,6 +2088,13 @@ def create_app() -> FastAPI:
     else:
         release_readiness_store = InMemoryReleaseReadinessStore()
 
+    if governance_approval_store_type == "file":
+        if not governance_approval_file_path:
+            raise RuntimeError("GOVERNANCE_APPROVAL_FILE_PATH is required when GOVERNANCE_APPROVAL_STORE=file")
+        governance_approval_store = JsonFileGovernanceApprovalStore(governance_approval_file_path)
+    else:
+        governance_approval_store = InMemoryGovernanceApprovalStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -2190,6 +2244,7 @@ def create_app() -> FastAPI:
     workflow_marketplace = WorkflowMarketplaceService(store=workflow_marketplace_store)
     benchmark_lab = BenchmarkLabService(store=benchmark_lab_store)
     release_readiness = ReleaseReadinessService(store=release_readiness_store)
+    governance_approval = GovernanceApprovalWorkflowService(store=governance_approval_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -2334,6 +2389,12 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/benchmarks/lab") or path.startswith("/benchmarks/lab"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/release/readiness") or path.startswith("/release/readiness"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/governance/approvals/requests") or path.startswith("/governance/approvals/requests"):
+            if method.upper() in {"GET"}:
+                return "operator"
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/governance/approvals") or path.startswith("/governance/approvals"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -5419,6 +5480,130 @@ def create_app() -> FastAPI:
         if scorecard is None:
             raise HTTPException(status_code=404, detail="release readiness scorecard not found")
         return _to_release_readiness_response(scorecard)
+
+    def _to_governance_approval_response(payload: dict[str, Any]) -> GovernanceApprovalRequestResponse:
+        return GovernanceApprovalRequestResponse(
+            request_id=str(payload.get("request_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            policy_id=str(payload.get("policy_id", "")),
+            change_summary=str(payload.get("change_summary", "")),
+            risk_score=float(payload.get("risk_score", 0.0)),
+            submitted_by=str(payload.get("submitted_by", "")),
+            required_approvals=int(payload.get("required_approvals", 1)),
+            approvals=[
+                dict(item)
+                for item in payload.get("approvals", [])
+                if isinstance(item, dict)
+            ],
+            rejections=[
+                dict(item)
+                for item in payload.get("rejections", [])
+                if isinstance(item, dict)
+            ],
+            status=str(payload.get("status", "unknown")),
+            metadata={
+                str(key): str(value)
+                for key, value in dict(payload.get("metadata", {})).items()
+            },
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _submit_governance_approval_request(
+        request_id: str,
+        payload: GovernanceApprovalSubmitRequest,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        try:
+            approval = governance_approval.submit_request(
+                tenant_id=_tenant_id(request),
+                request_id=request_id,
+                policy_id=payload.policy_id,
+                change_summary=payload.change_summary,
+                risk_score=payload.risk_score,
+                submitted_by=payload.submitted_by,
+                required_approvals=payload.required_approvals,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_governance_approval_response(approval)
+
+    def _approve_governance_request(
+        request_id: str,
+        payload: GovernanceApprovalDecisionRequest,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        try:
+            approval = governance_approval.approve_request(
+                tenant_id=_tenant_id(request),
+                request_id=request_id,
+                approver=payload.approver,
+                comment=payload.comment,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"approval request not found", "approval request does not belong to tenant"}:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+
+        return _to_governance_approval_response(approval)
+
+    def _reject_governance_request(
+        request_id: str,
+        payload: GovernanceApprovalRejectRequest,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        try:
+            approval = governance_approval.reject_request(
+                tenant_id=_tenant_id(request),
+                request_id=request_id,
+                approver=payload.approver,
+                reason=payload.reason,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"approval request not found", "approval request does not belong to tenant"}:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+
+        return _to_governance_approval_response(approval)
+
+    def _get_governance_approval_request(
+        request_id: str,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        try:
+            approval = governance_approval.get_request(
+                tenant_id=_tenant_id(request),
+                request_id=request_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if approval is None:
+            raise HTTPException(status_code=404, detail="governance approval request not found")
+        return _to_governance_approval_response(approval)
+
+    def _list_governance_approval_requests(
+        request: Request,
+        policy_id: str | None,
+        status: str | None,
+        limit: int,
+    ) -> GovernanceApprovalRequestListResponse:
+        try:
+            items = governance_approval.list_requests(
+                tenant_id=_tenant_id(request),
+                policy_id=policy_id,
+                status=status,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        responses = [_to_governance_approval_response(item) for item in items]
+        return GovernanceApprovalRequestListResponse(items=responses, total=len(responses))
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -10489,6 +10674,215 @@ def create_app() -> FastAPI:
     ) -> ReleaseReadinessScorecardResponse:
         _set_deprecation_headers(response)
         return _get_release_readiness_scorecard(scorecard_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/governance/approvals/requests/{{request_id}}",
+        response_model=GovernanceApprovalRequestResponse,
+    )
+    def submit_governance_approval_request_v1(
+        request_id: str,
+        payload: GovernanceApprovalSubmitRequest,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        approval = _submit_governance_approval_request(request_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="governance_approval_submit", units=1.0)
+        _append_audit_event(
+            request,
+            action="governance.approval.request.submit",
+            resource_type="governance_approval_request",
+            resource_id=approval.request_id,
+            details={"policy_id": approval.policy_id, "risk_score": approval.risk_score},
+        )
+        _publish_realtime_event(
+            event_type="governance.approval.request.submitted",
+            tenant_id=_tenant_id(request),
+            payload={"request_id": approval.request_id, "policy_id": approval.policy_id, "status": approval.status},
+        )
+        return approval
+
+    @app.post(
+        "/governance/approvals/requests/{request_id}",
+        response_model=GovernanceApprovalRequestResponse,
+        deprecated=True,
+    )
+    def submit_governance_approval_request_legacy(
+        request_id: str,
+        payload: GovernanceApprovalSubmitRequest,
+        response: Response,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        _set_deprecation_headers(response)
+        approval = _submit_governance_approval_request(request_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="governance_approval_submit", units=1.0)
+        _append_audit_event(
+            request,
+            action="governance.approval.request.submit",
+            resource_type="governance_approval_request",
+            resource_id=approval.request_id,
+            details={"policy_id": approval.policy_id, "risk_score": approval.risk_score},
+        )
+        _publish_realtime_event(
+            event_type="governance.approval.request.submitted",
+            tenant_id=_tenant_id(request),
+            payload={"request_id": approval.request_id, "policy_id": approval.policy_id, "status": approval.status},
+        )
+        return approval
+
+    @app.post(
+        f"{API_V1_PREFIX}/governance/approvals/requests/{{request_id}}/approve",
+        response_model=GovernanceApprovalRequestResponse,
+    )
+    def approve_governance_request_v1(
+        request_id: str,
+        payload: GovernanceApprovalDecisionRequest,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        approval = _approve_governance_request(request_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="governance_approval_decision", units=1.0)
+        _append_audit_event(
+            request,
+            action="governance.approval.request.approve",
+            resource_type="governance_approval_request",
+            resource_id=approval.request_id,
+            details={"status": approval.status, "approval_count": len(approval.approvals)},
+        )
+        _publish_realtime_event(
+            event_type="governance.approval.request.approved",
+            tenant_id=_tenant_id(request),
+            payload={"request_id": approval.request_id, "status": approval.status},
+        )
+        return approval
+
+    @app.post(
+        "/governance/approvals/requests/{request_id}/approve",
+        response_model=GovernanceApprovalRequestResponse,
+        deprecated=True,
+    )
+    def approve_governance_request_legacy(
+        request_id: str,
+        payload: GovernanceApprovalDecisionRequest,
+        response: Response,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        _set_deprecation_headers(response)
+        approval = _approve_governance_request(request_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="governance_approval_decision", units=1.0)
+        _append_audit_event(
+            request,
+            action="governance.approval.request.approve",
+            resource_type="governance_approval_request",
+            resource_id=approval.request_id,
+            details={"status": approval.status, "approval_count": len(approval.approvals)},
+        )
+        _publish_realtime_event(
+            event_type="governance.approval.request.approved",
+            tenant_id=_tenant_id(request),
+            payload={"request_id": approval.request_id, "status": approval.status},
+        )
+        return approval
+
+    @app.post(
+        f"{API_V1_PREFIX}/governance/approvals/requests/{{request_id}}/reject",
+        response_model=GovernanceApprovalRequestResponse,
+    )
+    def reject_governance_request_v1(
+        request_id: str,
+        payload: GovernanceApprovalRejectRequest,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        approval = _reject_governance_request(request_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="governance_approval_decision", units=1.0)
+        _append_audit_event(
+            request,
+            action="governance.approval.request.reject",
+            resource_type="governance_approval_request",
+            resource_id=approval.request_id,
+            details={"status": approval.status, "rejection_count": len(approval.rejections)},
+        )
+        _publish_realtime_event(
+            event_type="governance.approval.request.rejected",
+            tenant_id=_tenant_id(request),
+            payload={"request_id": approval.request_id, "status": approval.status},
+        )
+        return approval
+
+    @app.post(
+        "/governance/approvals/requests/{request_id}/reject",
+        response_model=GovernanceApprovalRequestResponse,
+        deprecated=True,
+    )
+    def reject_governance_request_legacy(
+        request_id: str,
+        payload: GovernanceApprovalRejectRequest,
+        response: Response,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        _set_deprecation_headers(response)
+        approval = _reject_governance_request(request_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="governance_approval_decision", units=1.0)
+        _append_audit_event(
+            request,
+            action="governance.approval.request.reject",
+            resource_type="governance_approval_request",
+            resource_id=approval.request_id,
+            details={"status": approval.status, "rejection_count": len(approval.rejections)},
+        )
+        _publish_realtime_event(
+            event_type="governance.approval.request.rejected",
+            tenant_id=_tenant_id(request),
+            payload={"request_id": approval.request_id, "status": approval.status},
+        )
+        return approval
+
+    @app.get(
+        f"{API_V1_PREFIX}/governance/approvals/requests",
+        response_model=GovernanceApprovalRequestListResponse,
+    )
+    def list_governance_approval_requests_v1(
+        request: Request,
+        policy_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> GovernanceApprovalRequestListResponse:
+        return _list_governance_approval_requests(request, policy_id=policy_id, status=status, limit=limit)
+
+    @app.get(
+        "/governance/approvals/requests",
+        response_model=GovernanceApprovalRequestListResponse,
+        deprecated=True,
+    )
+    def list_governance_approval_requests_legacy(
+        response: Response,
+        request: Request,
+        policy_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> GovernanceApprovalRequestListResponse:
+        _set_deprecation_headers(response)
+        return _list_governance_approval_requests(request, policy_id=policy_id, status=status, limit=limit)
+
+    @app.get(
+        f"{API_V1_PREFIX}/governance/approvals/requests/{{request_id}}",
+        response_model=GovernanceApprovalRequestResponse,
+    )
+    def get_governance_approval_request_v1(
+        request_id: str,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        return _get_governance_approval_request(request_id, request)
+
+    @app.get(
+        "/governance/approvals/requests/{request_id}",
+        response_model=GovernanceApprovalRequestResponse,
+        deprecated=True,
+    )
+    def get_governance_approval_request_legacy(
+        request_id: str,
+        response: Response,
+        request: Request,
+    ) -> GovernanceApprovalRequestResponse:
+        _set_deprecation_headers(response)
+        return _get_governance_approval_request(request_id, request)
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
