@@ -49,7 +49,7 @@ Execution rule for this backlog:
 34. [x] Add human-in-the-loop review queue for low-confidence actions.
 35. [x] Add policy decision explorer UI with explanation trails.
 36. [x] Add feature flag service for safe progressive rollout.
-37. [ ] Add tenant usage metering tied to billable dimensions.
+37. [x] Add tenant usage metering tied to billable dimensions.
 38. [ ] Add billing primitives (plan limits, overage protection, monthly reports).
 39. [ ] Add legal-hold-aware retention controls for artifacts.
 40. [ ] Add data residency policy enforcement by tenant and region.

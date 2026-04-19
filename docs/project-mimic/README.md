@@ -57,6 +57,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/41-human-in-the-loop-review-queue-for-low-confidence-actions.md`
   - `lld/42-policy-decision-explorer-ui-with-explanation-trails.md`
   - `lld/43-feature-flag-service-for-safe-progressive-rollout.md`
+  - `lld/44-tenant-usage-metering-tied-to-billable-dimensions.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

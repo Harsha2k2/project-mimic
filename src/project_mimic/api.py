@@ -42,6 +42,7 @@ from .session_lifecycle import (
     SessionRegistry,
     SessionStatus,
 )
+from .usage_metering import InMemoryUsageMeteringStore, JsonFileUsageMeteringStore, TenantUsageMetering
 from .webhooks import (
     InMemoryWebhookSubscriptionStore,
     JsonFileWebhookSubscriptionStore,
@@ -389,6 +390,29 @@ class FeatureFlagEvaluationResponse(APIPayloadModel):
     evaluated_at: float
 
 
+class UsageRecordResponse(APIPayloadModel):
+    record_key: str
+    tenant_id: str
+    dimension: str
+    day_bucket: int
+    units: float
+    created_at: float
+    updated_at: float
+
+
+class UsageRecordListResponse(APIPayloadModel):
+    items: list[UsageRecordResponse]
+    total: int
+
+
+class UsageSummaryResponse(APIPayloadModel):
+    tenant_id: str
+    start_day: int | None = None
+    end_day: int | None = None
+    dimensions: dict[str, float] = Field(default_factory=dict)
+    total_units: float
+
+
 class DriftSampleRequest(APIPayloadModel):
     stream_id: str
     metric_name: str
@@ -552,6 +576,8 @@ def create_app() -> FastAPI:
     model_registry_file_path = os.getenv("MODEL_REGISTRY_FILE_PATH", "")
     feature_flag_store_type = os.getenv("FEATURE_FLAG_STORE", "memory").strip().lower()
     feature_flag_file_path = os.getenv("FEATURE_FLAG_FILE_PATH", "")
+    usage_metering_store_type = os.getenv("USAGE_METERING_STORE", "memory").strip().lower()
+    usage_metering_file_path = os.getenv("USAGE_METERING_FILE_PATH", "")
     drift_baseline_window = int(os.getenv("DRIFT_BASELINE_WINDOW", "20"))
     drift_recent_window = int(os.getenv("DRIFT_RECENT_WINDOW", "10"))
     drift_default_threshold = float(os.getenv("DRIFT_DEFAULT_THRESHOLD", "0.25"))
@@ -684,6 +710,13 @@ def create_app() -> FastAPI:
     else:
         feature_flag_store = InMemoryFeatureFlagStore()
 
+    if usage_metering_store_type == "file":
+        if not usage_metering_file_path:
+            raise RuntimeError("USAGE_METERING_FILE_PATH is required when USAGE_METERING_STORE=file")
+        usage_metering_store = JsonFileUsageMeteringStore(usage_metering_file_path)
+    else:
+        usage_metering_store = InMemoryUsageMeteringStore()
+
     if policy_decision_store_type == "file":
         if not policy_decision_file_path:
             raise RuntimeError("POLICY_DECISION_FILE_PATH is required when POLICY_DECISION_STORE=file")
@@ -712,6 +745,7 @@ def create_app() -> FastAPI:
     )
     model_registry = ModelRegistry(store=model_registry_store)
     feature_flags = FeatureFlagService(store=feature_flag_store)
+    usage_metering = TenantUsageMetering(store=usage_metering_store)
     drift_monitor = DriftMonitor(
         baseline_window=drift_baseline_window,
         recent_window=drift_recent_window,
@@ -748,6 +782,8 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/feature-flags/evaluate") or path.startswith("/feature-flags/evaluate"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/feature-flags") or path.startswith("/feature-flags"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/usage/metering") or path.startswith("/usage/metering"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/events/subscriptions") or path.startswith("/events/subscriptions"):
             return "admin"
@@ -1029,6 +1065,64 @@ def create_app() -> FastAPI:
             rollout_percentage=int(result.get("rollout_percentage", 0)),
             matched_allowlist=bool(result.get("matched_allowlist", False)),
             evaluated_at=float(result.get("evaluated_at", time.time())),
+        )
+
+    def _to_usage_record_response(payload: dict[str, Any]) -> UsageRecordResponse:
+        return UsageRecordResponse(
+            record_key=str(payload.get("record_key", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            dimension=str(payload.get("dimension", "")),
+            day_bucket=int(payload.get("day_bucket", 0)),
+            units=float(payload.get("units", 0.0)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _record_usage_metering(
+        *,
+        tenant_id: str,
+        dimension: str,
+        units: float = 1.0,
+    ) -> None:
+        try:
+            usage_metering.record(tenant_id=tenant_id, dimension=dimension, units=units)
+        except Exception:
+            # Metering should not block control-plane operations.
+            return
+
+    def _list_usage_records(
+        *,
+        tenant_id: str | None,
+        dimension: str | None,
+        limit: int,
+    ) -> UsageRecordListResponse:
+        items = usage_metering.list_records(tenant_id=tenant_id, dimension=dimension, limit=limit)
+        response_items = [_to_usage_record_response(item) for item in items]
+        return UsageRecordListResponse(items=response_items, total=len(response_items))
+
+    def _usage_summary(
+        *,
+        tenant_id: str,
+        start_day: int | None,
+        end_day: int | None,
+    ) -> UsageSummaryResponse:
+        try:
+            payload = usage_metering.summarize(
+                tenant_id=tenant_id,
+                start_day=start_day,
+                end_day=end_day,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return UsageSummaryResponse(
+            tenant_id=str(payload.get("tenant_id", tenant_id)),
+            start_day=(None if payload.get("start_day") is None else int(payload.get("start_day"))),
+            end_day=(None if payload.get("end_day") is None else int(payload.get("end_day"))),
+            dimensions={
+                str(key): float(value)
+                for key, value in dict(payload.get("dimensions", {})).items()
+            },
+            total_units=float(payload.get("total_units", 0.0)),
         )
 
     def _to_drift_status_response(payload: dict[str, Any]) -> DriftStatusResponse:
@@ -1886,9 +1980,19 @@ def create_app() -> FastAPI:
                 timeout_response = _reject_request_timeout(request, request_id)
                 timeout_response.headers["X-Request-ID"] = request_id
                 timeout_response.headers["X-Correlation-ID"] = request_id
+                _record_usage_metering(
+                    tenant_id=_tenant_id(request),
+                    dimension="api_request",
+                    units=1.0,
+                )
                 return timeout_response
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         metrics.record(request.url.path, response.status_code, elapsed_ms)
+        _record_usage_metering(
+            tenant_id=_tenant_id(request),
+            dimension="api_request",
+            units=1.0,
+        )
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Correlation-ID"] = request_id
         return response
@@ -1971,6 +2075,7 @@ def create_app() -> FastAPI:
     @app.post(f"{API_V1_PREFIX}/sessions", response_model=SessionCreatedResponse)
     def create_session_v1(payload: CreateSessionRequest, request: Request) -> SessionCreatedResponse:
         response = _create_session(payload, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="session_create", units=1.0)
         _append_audit_event(
             request,
             action="session.create",
@@ -2001,6 +2106,7 @@ def create_app() -> FastAPI:
     ) -> SessionCreatedResponse:
         _set_deprecation_headers(response)
         created = _create_session(payload, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="session_create", units=1.0)
         _append_audit_event(
             request,
             action="session.create",
@@ -2068,6 +2174,7 @@ def create_app() -> FastAPI:
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/step", response_model=StepResponse)
     def step_session_v1(session_id: str, action: UIAction, request: Request) -> StepResponse:
         response = _step_session(session_id, action, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="session_step", units=1.0)
         _append_audit_event(
             request,
             action="session.step",
@@ -2100,6 +2207,7 @@ def create_app() -> FastAPI:
     ) -> StepResponse:
         _set_deprecation_headers(response)
         step_response = _step_session(session_id, action, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="session_step", units=1.0)
         _append_audit_event(
             request,
             action="session.step",
@@ -2243,6 +2351,7 @@ def create_app() -> FastAPI:
     @app.post(f"{API_V1_PREFIX}/jobs", response_model=AsyncJobSubmitResponse)
     def submit_async_job_v1(payload: AsyncJobSubmitRequest, request: Request) -> AsyncJobSubmitResponse:
         submitted = _submit_async_job(payload)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="async_job_submit", units=1.0)
         _append_audit_event(
             request,
             action="async_job.submit",
@@ -2269,6 +2378,7 @@ def create_app() -> FastAPI:
     ) -> AsyncJobSubmitResponse:
         _set_deprecation_headers(response)
         submitted = _submit_async_job(payload)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="async_job_submit", units=1.0)
         _append_audit_event(
             request,
             action="async_job.submit",
@@ -2655,6 +2765,7 @@ def create_app() -> FastAPI:
         request: Request,
     ) -> FeatureFlagEvaluationResponse:
         evaluation = _evaluate_feature_flag(payload, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="feature_flag_evaluate", units=1.0)
         _append_audit_event(
             request,
             action="feature.flag.evaluate",
@@ -2685,6 +2796,7 @@ def create_app() -> FastAPI:
     ) -> FeatureFlagEvaluationResponse:
         _set_deprecation_headers(response)
         evaluation = _evaluate_feature_flag(payload, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="feature_flag_evaluate", units=1.0)
         _append_audit_event(
             request,
             action="feature.flag.evaluate",
@@ -2706,6 +2818,58 @@ def create_app() -> FastAPI:
             },
         )
         return evaluation
+
+    @app.get(f"{API_V1_PREFIX}/usage/metering/records", response_model=UsageRecordListResponse)
+    def list_usage_metering_records_v1(
+        request: Request,
+        tenant_id: str | None = Query(default=None),
+        dimension: str | None = Query(default=None),
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> UsageRecordListResponse:
+        resolved_tenant = tenant_id.strip() if tenant_id is not None else _tenant_id(request)
+        if not resolved_tenant:
+            resolved_tenant = _tenant_id(request)
+        return _list_usage_records(tenant_id=resolved_tenant, dimension=dimension, limit=limit)
+
+    @app.get("/usage/metering/records", response_model=UsageRecordListResponse, deprecated=True)
+    def list_usage_metering_records_legacy(
+        request: Request,
+        response: Response,
+        tenant_id: str | None = Query(default=None),
+        dimension: str | None = Query(default=None),
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> UsageRecordListResponse:
+        _set_deprecation_headers(response)
+        resolved_tenant = tenant_id.strip() if tenant_id is not None else _tenant_id(request)
+        if not resolved_tenant:
+            resolved_tenant = _tenant_id(request)
+        return _list_usage_records(tenant_id=resolved_tenant, dimension=dimension, limit=limit)
+
+    @app.get(f"{API_V1_PREFIX}/usage/metering/summary", response_model=UsageSummaryResponse)
+    def usage_metering_summary_v1(
+        request: Request,
+        tenant_id: str | None = Query(default=None),
+        start_day: int | None = Query(default=None, ge=0),
+        end_day: int | None = Query(default=None, ge=0),
+    ) -> UsageSummaryResponse:
+        resolved_tenant = tenant_id.strip() if tenant_id is not None else _tenant_id(request)
+        if not resolved_tenant:
+            resolved_tenant = _tenant_id(request)
+        return _usage_summary(tenant_id=resolved_tenant, start_day=start_day, end_day=end_day)
+
+    @app.get("/usage/metering/summary", response_model=UsageSummaryResponse, deprecated=True)
+    def usage_metering_summary_legacy(
+        request: Request,
+        response: Response,
+        tenant_id: str | None = Query(default=None),
+        start_day: int | None = Query(default=None, ge=0),
+        end_day: int | None = Query(default=None, ge=0),
+    ) -> UsageSummaryResponse:
+        _set_deprecation_headers(response)
+        resolved_tenant = tenant_id.strip() if tenant_id is not None else _tenant_id(request)
+        if not resolved_tenant:
+            resolved_tenant = _tenant_id(request)
+        return _usage_summary(tenant_id=resolved_tenant, start_day=start_day, end_day=end_day)
 
     @app.post(f"{API_V1_PREFIX}/drift/samples", response_model=DriftStatusResponse)
     def ingest_drift_sample_v1(payload: DriftSampleRequest, request: Request) -> DriftStatusResponse:
@@ -2787,6 +2951,7 @@ def create_app() -> FastAPI:
         request: Request,
     ) -> ReviewQueueItemResponse:
         item = _submit_review_queue_item(payload, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="review_queue_submit", units=1.0)
         _append_audit_event(
             request,
             action="review.queue.submit",
@@ -2813,6 +2978,7 @@ def create_app() -> FastAPI:
     ) -> ReviewQueueItemResponse:
         _set_deprecation_headers(response)
         item = _submit_review_queue_item(payload, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="review_queue_submit", units=1.0)
         _append_audit_event(
             request,
             action="review.queue.submit",
@@ -2907,6 +3073,7 @@ def create_app() -> FastAPI:
         request: Request,
     ) -> PolicyDecisionResponse:
         decision = _evaluate_policy_decision(payload, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="policy_decision_evaluate", units=1.0)
         _append_audit_event(
             request,
             action="policy.decision.evaluate",
@@ -2938,6 +3105,7 @@ def create_app() -> FastAPI:
     ) -> PolicyDecisionResponse:
         _set_deprecation_headers(response)
         decision = _evaluate_policy_decision(payload, tenant_id=_tenant_id(request))
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="policy_decision_evaluate", units=1.0)
         _append_audit_event(
             request,
             action="policy.decision.evaluate",
