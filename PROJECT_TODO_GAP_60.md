@@ -34,7 +34,7 @@ Execution rule for this backlog:
 22. [x] Add load and stress tests with capacity thresholds as release gates.
 23. [x] Add SLO burn-rate alerts wired to on-call paging.
 24. [x] Add runbook automation for common incident classes.
-25. [ ] Add compliance-safe data deletion workflows.
+25. [x] Add compliance-safe data deletion workflows.
 
 ## Needed + Partial (P1)
 
