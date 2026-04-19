@@ -46,7 +46,7 @@ Execution rule for this backlog:
 31. [x] Add event stream delivery (SSE or message bus) for realtime status.
 32. [x] Add model registry with rollout channels (dev, canary, prod).
 33. [x] Add online model/grounding drift detection and threshold alerts.
-34. [ ] Add human-in-the-loop review queue for low-confidence actions.
+34. [x] Add human-in-the-loop review queue for low-confidence actions.
 35. [ ] Add policy decision explorer UI with explanation trails.
 36. [ ] Add feature flag service for safe progressive rollout.
 37. [ ] Add tenant usage metering tied to billable dimensions.

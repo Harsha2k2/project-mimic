@@ -27,6 +27,7 @@ from .model_registry import InMemoryModelRegistryStore, JsonFileModelRegistrySto
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
 from .queue_runtime import ActionJob, InMemoryActionQueue, JsonFileQueueStore
+from .review_queue import HumanReviewQueue, InMemoryReviewQueueStore, JsonFileReviewQueueStore
 from .security import redact_sensitive_structure, redact_sensitive_text
 from .orchestrator.decision_orchestrator import DecisionOrchestrator
 from .session_lifecycle import (
@@ -360,6 +361,37 @@ class DriftAlertListResponse(APIPayloadModel):
     total: int
 
 
+class ReviewQueueSubmitRequest(APIPayloadModel):
+    session_id: str | None = None
+    action_payload: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+
+
+class ReviewQueueResolveRequest(APIPayloadModel):
+    decision: str
+    note: str | None = None
+
+
+class ReviewQueueItemResponse(APIPayloadModel):
+    review_id: str
+    tenant_id: str
+    session_id: str | None = None
+    action_payload: dict[str, Any] = Field(default_factory=dict)
+    confidence: float
+    reason: str
+    status: str
+    resolution: str | None = None
+    resolution_note: str | None = None
+    created_at: float
+    resolved_at: float | None = None
+
+
+class ReviewQueueListResponse(APIPayloadModel):
+    items: list[ReviewQueueItemResponse]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -418,6 +450,8 @@ def create_app() -> FastAPI:
     drift_baseline_window = int(os.getenv("DRIFT_BASELINE_WINDOW", "20"))
     drift_recent_window = int(os.getenv("DRIFT_RECENT_WINDOW", "10"))
     drift_default_threshold = float(os.getenv("DRIFT_DEFAULT_THRESHOLD", "0.25"))
+    review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
+    review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
     webhook_store_type = os.getenv("WEBHOOK_SUBSCRIPTION_STORE", "memory").strip().lower()
     webhook_store_file_path = os.getenv("WEBHOOK_SUBSCRIPTION_FILE_PATH", "")
@@ -535,6 +569,13 @@ def create_app() -> FastAPI:
     else:
         model_registry_store = InMemoryModelRegistryStore()
 
+    if review_queue_store_type == "file":
+        if not review_queue_file_path:
+            raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
+        review_queue_store = JsonFileReviewQueueStore(review_queue_file_path)
+    else:
+        review_queue_store = InMemoryReviewQueueStore()
+
     if webhook_store_type == "file":
         if not webhook_store_file_path:
             raise RuntimeError("WEBHOOK_SUBSCRIPTION_FILE_PATH is required when WEBHOOK_SUBSCRIPTION_STORE=file")
@@ -553,6 +594,7 @@ def create_app() -> FastAPI:
         recent_window=drift_recent_window,
         default_threshold=drift_default_threshold,
     )
+    review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
     orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
@@ -815,6 +857,76 @@ def create_app() -> FastAPI:
     def _list_drift_alerts() -> DriftAlertListResponse:
         items = [_to_drift_status_response(payload) for payload in drift_monitor.active_alerts()]
         return DriftAlertListResponse(items=items, total=len(items))
+
+    def _to_review_queue_item_response(payload: dict[str, Any]) -> ReviewQueueItemResponse:
+        return ReviewQueueItemResponse(
+            review_id=str(payload.get("review_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            session_id=(
+                None
+                if payload.get("session_id") is None
+                else str(payload.get("session_id"))
+            ),
+            action_payload=dict(payload.get("action_payload", {})),
+            confidence=float(payload.get("confidence", 0.0)),
+            reason=str(payload.get("reason", "")),
+            status=str(payload.get("status", "pending")),
+            resolution=(
+                None
+                if payload.get("resolution") is None
+                else str(payload.get("resolution"))
+            ),
+            resolution_note=(
+                None
+                if payload.get("resolution_note") is None
+                else str(payload.get("resolution_note"))
+            ),
+            created_at=float(payload.get("created_at", 0.0)),
+            resolved_at=(
+                None
+                if payload.get("resolved_at") is None
+                else float(payload.get("resolved_at"))
+            ),
+        )
+
+    def _submit_review_queue_item(
+        payload: ReviewQueueSubmitRequest,
+        *,
+        tenant_id: str,
+    ) -> ReviewQueueItemResponse:
+        try:
+            item = review_queue.submit(
+                tenant_id=tenant_id,
+                action_payload=payload.action_payload,
+                confidence=payload.confidence,
+                reason=payload.reason,
+                session_id=payload.session_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_review_queue_item_response(item)
+
+    def _list_review_queue_items(
+        *,
+        tenant_id: str,
+        status: str | None,
+        limit: int,
+    ) -> ReviewQueueListResponse:
+        items = review_queue.list(tenant_id=tenant_id, status=status, limit=limit)
+        response_items = [_to_review_queue_item_response(payload) for payload in items]
+        return ReviewQueueListResponse(items=response_items, total=len(response_items))
+
+    def _resolve_review_queue_item(
+        review_id: str,
+        payload: ReviewQueueResolveRequest,
+    ) -> ReviewQueueItemResponse:
+        try:
+            item = review_queue.resolve(review_id=review_id, decision=payload.decision, note=payload.note)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="review item not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return _to_review_queue_item_response(item)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -2101,6 +2213,126 @@ def create_app() -> FastAPI:
     def list_drift_alerts_legacy(response: Response) -> DriftAlertListResponse:
         _set_deprecation_headers(response)
         return _list_drift_alerts()
+
+    @app.post(f"{API_V1_PREFIX}/reviews/queue", response_model=ReviewQueueItemResponse)
+    def submit_review_queue_item_v1(
+        payload: ReviewQueueSubmitRequest,
+        request: Request,
+    ) -> ReviewQueueItemResponse:
+        item = _submit_review_queue_item(payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="review.queue.submit",
+            resource_type="review_item",
+            resource_id=item.review_id,
+            details={"confidence": item.confidence},
+        )
+        _publish_realtime_event(
+            event_type="review.queue.submitted",
+            tenant_id=_tenant_id(request),
+            payload={
+                "review_id": item.review_id,
+                "confidence": item.confidence,
+                "status": item.status,
+            },
+        )
+        return item
+
+    @app.post("/reviews/queue", response_model=ReviewQueueItemResponse, deprecated=True)
+    def submit_review_queue_item_legacy(
+        payload: ReviewQueueSubmitRequest,
+        response: Response,
+        request: Request,
+    ) -> ReviewQueueItemResponse:
+        _set_deprecation_headers(response)
+        item = _submit_review_queue_item(payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="review.queue.submit",
+            resource_type="review_item",
+            resource_id=item.review_id,
+            details={"confidence": item.confidence},
+        )
+        _publish_realtime_event(
+            event_type="review.queue.submitted",
+            tenant_id=_tenant_id(request),
+            payload={
+                "review_id": item.review_id,
+                "confidence": item.confidence,
+                "status": item.status,
+            },
+        )
+        return item
+
+    @app.get(f"{API_V1_PREFIX}/reviews/queue", response_model=ReviewQueueListResponse)
+    def list_review_queue_items_v1(
+        request: Request,
+        status: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> ReviewQueueListResponse:
+        return _list_review_queue_items(tenant_id=_tenant_id(request), status=status, limit=limit)
+
+    @app.get("/reviews/queue", response_model=ReviewQueueListResponse, deprecated=True)
+    def list_review_queue_items_legacy(
+        response: Response,
+        request: Request,
+        status: str | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> ReviewQueueListResponse:
+        _set_deprecation_headers(response)
+        return _list_review_queue_items(tenant_id=_tenant_id(request), status=status, limit=limit)
+
+    @app.post(f"{API_V1_PREFIX}/reviews/queue/{{review_id}}/resolve", response_model=ReviewQueueItemResponse)
+    def resolve_review_queue_item_v1(
+        review_id: str,
+        payload: ReviewQueueResolveRequest,
+        request: Request,
+    ) -> ReviewQueueItemResponse:
+        item = _resolve_review_queue_item(review_id, payload)
+        _append_audit_event(
+            request,
+            action="review.queue.resolve",
+            resource_type="review_item",
+            resource_id=item.review_id,
+            details={"resolution": item.resolution},
+        )
+        _publish_realtime_event(
+            event_type="review.queue.resolved",
+            tenant_id=_tenant_id(request),
+            payload={
+                "review_id": item.review_id,
+                "resolution": item.resolution,
+                "status": item.status,
+            },
+        )
+        return item
+
+    @app.post("/reviews/queue/{review_id}/resolve", response_model=ReviewQueueItemResponse, deprecated=True)
+    def resolve_review_queue_item_legacy(
+        review_id: str,
+        payload: ReviewQueueResolveRequest,
+        response: Response,
+        request: Request,
+    ) -> ReviewQueueItemResponse:
+        _set_deprecation_headers(response)
+        item = _resolve_review_queue_item(review_id, payload)
+        _append_audit_event(
+            request,
+            action="review.queue.resolve",
+            resource_type="review_item",
+            resource_id=item.review_id,
+            details={"resolution": item.resolution},
+        )
+        _publish_realtime_event(
+            event_type="review.queue.resolved",
+            tenant_id=_tenant_id(request),
+            payload={
+                "review_id": item.review_id,
+                "resolution": item.resolution,
+                "status": item.status,
+            },
+        )
+        return item
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:

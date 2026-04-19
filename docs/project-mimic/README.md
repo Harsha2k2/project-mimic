@@ -54,6 +54,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/38-event-stream-delivery-via-sse-for-realtime-status.md`
   - `lld/39-model-registry-with-dev-canary-prod-rollout-channels.md`
   - `lld/40-online-model-and-grounding-drift-detection-with-threshold-alerts.md`
+  - `lld/41-human-in-the-loop-review-queue-for-low-confidence-actions.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
