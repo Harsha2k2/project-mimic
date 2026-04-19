@@ -21,6 +21,7 @@ from .audit_export import (
     build_audit_export_sink_from_env,
 )
 from .benchmarking import BenchmarkReport, BenchmarkTaskResult, run_benchmark
+from .cluster_chaos import ChaosScenario, ClusterChaosTestSuite, REQUIRED_FAULT_CLASSES
 from .engine import ClickDecision, ExecutionEngine
 from .determinism import get_global_seed, resolve_seed, set_global_seed
 from .error_mapping import ErrorEnvelope, map_exception_to_error
@@ -151,6 +152,9 @@ __all__ = [
     "EmitKeystrokesRequest",
     "EmitPointerRequest",
     "ErrorCode",
+    "ChaosScenario",
+    "ClusterChaosTestSuite",
+    "REQUIRED_FAULT_CLASSES",
     "ErrorEnvelope",
     "ExecutionEngine",
     "GroundActionRequest",

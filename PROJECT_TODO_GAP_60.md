@@ -57,7 +57,7 @@ Execution rule for this backlog:
 42. [x] Add broader browser engine coverage and cross-browser parity tests.
 43. [x] Add pluggable site-pack packaging/versioning model for strategies.
 44. [x] Add synthetic monitoring for API, queue, worker, and inference paths.
-45. [ ] Add cluster-level chaos testing (node loss, network partition, storage faults).
+45. [x] Add cluster-level chaos testing (node loss, network partition, storage faults).
 
 ## Strategic Improvements (P2)
 
