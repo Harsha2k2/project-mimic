@@ -23,6 +23,11 @@ from pydantic import ConfigDict, Field
 from .error_mapping import map_exception_to_error
 from .audit_export import build_audit_export_sink_from_env
 from .billing import BillingPrimitives, InMemoryBillingStore, JsonFileBillingStore
+from .data_residency import (
+    InMemoryDataResidencyStore,
+    JsonFileDataResidencyStore,
+    TenantDataResidencyPolicyService,
+)
 from .drift_detection import DriftMonitor
 from .engine import ExecutionEngine
 from .event_stream import EventStreamBroker
@@ -469,6 +474,33 @@ class BillingMonthlyReportResponse(BillingOverageStatusResponse):
     generated_at: float
 
 
+class DataResidencyPolicyUpsertRequest(APIPayloadModel):
+    allowed_regions: list[str] = Field(default_factory=list)
+    default_region: str | None = None
+
+
+class DataResidencyPolicyResponse(APIPayloadModel):
+    tenant_id: str
+    allowed_regions: list[str] = Field(default_factory=list)
+    default_region: str
+    created_at: float
+    updated_at: float
+
+
+class DataResidencyPolicyListResponse(APIPayloadModel):
+    items: list[DataResidencyPolicyResponse]
+    total: int
+
+
+class DataResidencyValidationResponse(APIPayloadModel):
+    tenant_id: str
+    region: str
+    allowed: bool
+    reason: str
+    allowed_regions: list[str] = Field(default_factory=list)
+    default_region: str | None = None
+
+
 class DriftSampleRequest(APIPayloadModel):
     stream_id: str
     metric_name: str
@@ -642,6 +674,15 @@ def create_app() -> FastAPI:
         "yes",
         "on",
     }
+    data_residency_store_type = os.getenv("DATA_RESIDENCY_STORE", "memory").strip().lower()
+    data_residency_file_path = os.getenv("DATA_RESIDENCY_FILE_PATH", "")
+    data_residency_enforcement_enabled = os.getenv("DATA_RESIDENCY_ENFORCEMENT_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    data_residency_default_region = os.getenv("DATA_RESIDENCY_DEFAULT_REGION", "global").strip().lower() or "global"
     drift_baseline_window = int(os.getenv("DRIFT_BASELINE_WINDOW", "20"))
     drift_recent_window = int(os.getenv("DRIFT_RECENT_WINDOW", "10"))
     drift_default_threshold = float(os.getenv("DRIFT_DEFAULT_THRESHOLD", "0.25"))
@@ -788,6 +829,13 @@ def create_app() -> FastAPI:
     else:
         billing_store = InMemoryBillingStore()
 
+    if data_residency_store_type == "file":
+        if not data_residency_file_path:
+            raise RuntimeError("DATA_RESIDENCY_FILE_PATH is required when DATA_RESIDENCY_STORE=file")
+        data_residency_store = JsonFileDataResidencyStore(data_residency_file_path)
+    else:
+        data_residency_store = InMemoryDataResidencyStore()
+
     if policy_decision_store_type == "file":
         if not policy_decision_file_path:
             raise RuntimeError("POLICY_DECISION_FILE_PATH is required when POLICY_DECISION_STORE=file")
@@ -818,6 +866,7 @@ def create_app() -> FastAPI:
     feature_flags = FeatureFlagService(store=feature_flag_store)
     usage_metering = TenantUsageMetering(store=usage_metering_store)
     billing = BillingPrimitives(store=billing_store)
+    data_residency = TenantDataResidencyPolicyService(store=data_residency_store)
     drift_monitor = DriftMonitor(
         baseline_window=drift_baseline_window,
         recent_window=drift_recent_window,
@@ -858,6 +907,10 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/usage/metering") or path.startswith("/usage/metering"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/billing") or path.startswith("/billing"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/data-residency/validate") or path.startswith("/data-residency/validate"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/data-residency") or path.startswith("/data-residency"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/events/subscriptions") or path.startswith("/events/subscriptions"):
             return "admin"
@@ -1376,6 +1429,94 @@ def create_app() -> FastAPI:
                 {
                     "tenant_id": tenant_id,
                     "blocked_dimensions": status.blocked_dimensions,
+                }
+            ],
+        )
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Correlation-ID"] = request_id
+        return response
+
+    def _region_from_request(request: Request) -> str:
+        return request.headers.get("x-region", "").strip().lower() or data_residency_default_region
+
+    def _to_data_residency_policy_response(payload: dict[str, Any]) -> DataResidencyPolicyResponse:
+        return DataResidencyPolicyResponse(
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            allowed_regions=[str(item) for item in payload.get("allowed_regions", []) if isinstance(item, str)],
+            default_region=str(payload.get("default_region", data_residency_default_region)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _upsert_data_residency_policy(
+        tenant_id: str,
+        payload: DataResidencyPolicyUpsertRequest,
+    ) -> DataResidencyPolicyResponse:
+        try:
+            policy = data_residency.set_policy(
+                tenant_id=tenant_id,
+                allowed_regions=payload.allowed_regions,
+                default_region=payload.default_region,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_data_residency_policy_response(policy)
+
+    def _get_data_residency_policy(tenant_id: str) -> DataResidencyPolicyResponse:
+        try:
+            policy = data_residency.get_policy(tenant_id=tenant_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="data residency policy not found") from exc
+        return _to_data_residency_policy_response(policy)
+
+    def _list_data_residency_policies() -> DataResidencyPolicyListResponse:
+        items = [_to_data_residency_policy_response(item) for item in data_residency.list_policies()]
+        return DataResidencyPolicyListResponse(items=items, total=len(items))
+
+    def _validate_data_residency(tenant_id: str, region: str) -> DataResidencyValidationResponse:
+        try:
+            payload = data_residency.validate(tenant_id=tenant_id, region=region)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return DataResidencyValidationResponse(
+            tenant_id=str(payload.get("tenant_id", tenant_id)),
+            region=str(payload.get("region", region)),
+            allowed=bool(payload.get("allowed", True)),
+            reason=str(payload.get("reason", "unknown")),
+            allowed_regions=[str(item) for item in payload.get("allowed_regions", []) if isinstance(item, str)],
+            default_region=(
+                None
+                if payload.get("default_region") in {None, ""}
+                else str(payload.get("default_region"))
+            ),
+        )
+
+    def _data_residency_enforcement_response(request: Request, request_id: str, tenant_id: str) -> JSONResponse | None:
+        region = _region_from_request(request)
+        request.state.region = region
+
+        if not data_residency_enforcement_enabled:
+            return None
+
+        try:
+            validation = _validate_data_residency(tenant_id, region)
+        except Exception:
+            return None
+
+        request.state.region = validation.region
+        if validation.allowed:
+            return None
+
+        response = _error_response(
+            request,
+            status_code=403,
+            code=APIErrorCode.FORBIDDEN,
+            message="request region is not allowed by tenant data residency policy",
+            details=[
+                {
+                    "tenant_id": tenant_id,
+                    "region": validation.region,
+                    "allowed_regions": validation.allowed_regions,
                 }
             ],
         )
@@ -2220,6 +2361,10 @@ def create_app() -> FastAPI:
             throttled = _enforce_tenant_limits(request, request_id, _tenant_id(request))
             if throttled is not None:
                 return throttled
+
+            residency_blocked = _data_residency_enforcement_response(request, request_id, _tenant_id(request))
+            if residency_blocked is not None:
+                return residency_blocked
 
             overage_blocked = _billing_enforcement_response(request, request_id, _tenant_id(request))
             if overage_blocked is not None:
@@ -3257,6 +3402,84 @@ def create_app() -> FastAPI:
     ) -> BillingMonthlyReportResponse:
         _set_deprecation_headers(response)
         return _billing_monthly_report(tenant_id, month or _current_month())
+
+    @app.post(f"{API_V1_PREFIX}/data-residency/{{tenant_id}}", response_model=DataResidencyPolicyResponse)
+    def upsert_data_residency_policy_v1(
+        tenant_id: str,
+        payload: DataResidencyPolicyUpsertRequest,
+        request: Request,
+    ) -> DataResidencyPolicyResponse:
+        policy = _upsert_data_residency_policy(tenant_id, payload)
+        _append_audit_event(
+            request,
+            action="data_residency.policy.upsert",
+            resource_type="data_residency_policy",
+            resource_id=tenant_id,
+            details={"allowed_regions": policy.allowed_regions, "default_region": policy.default_region},
+        )
+        return policy
+
+    @app.post("/data-residency/{tenant_id}", response_model=DataResidencyPolicyResponse, deprecated=True)
+    def upsert_data_residency_policy_legacy(
+        tenant_id: str,
+        payload: DataResidencyPolicyUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> DataResidencyPolicyResponse:
+        _set_deprecation_headers(response)
+        policy = _upsert_data_residency_policy(tenant_id, payload)
+        _append_audit_event(
+            request,
+            action="data_residency.policy.upsert",
+            resource_type="data_residency_policy",
+            resource_id=tenant_id,
+            details={"allowed_regions": policy.allowed_regions, "default_region": policy.default_region},
+        )
+        return policy
+
+    @app.get(f"{API_V1_PREFIX}/data-residency", response_model=DataResidencyPolicyListResponse)
+    def list_data_residency_policies_v1() -> DataResidencyPolicyListResponse:
+        return _list_data_residency_policies()
+
+    @app.get("/data-residency", response_model=DataResidencyPolicyListResponse, deprecated=True)
+    def list_data_residency_policies_legacy(response: Response) -> DataResidencyPolicyListResponse:
+        _set_deprecation_headers(response)
+        return _list_data_residency_policies()
+
+    @app.get(f"{API_V1_PREFIX}/data-residency/validate", response_model=DataResidencyValidationResponse)
+    def validate_data_residency_v1(
+        request: Request,
+        tenant_id: str | None = Query(default=None),
+        region: str | None = Query(default=None),
+    ) -> DataResidencyValidationResponse:
+        resolved_tenant = tenant_id.strip() if tenant_id is not None else _tenant_id(request)
+        if not resolved_tenant:
+            resolved_tenant = _tenant_id(request)
+        resolved_region = (region or _region_from_request(request)).strip().lower()
+        return _validate_data_residency(resolved_tenant, resolved_region)
+
+    @app.get("/data-residency/validate", response_model=DataResidencyValidationResponse, deprecated=True)
+    def validate_data_residency_legacy(
+        request: Request,
+        response: Response,
+        tenant_id: str | None = Query(default=None),
+        region: str | None = Query(default=None),
+    ) -> DataResidencyValidationResponse:
+        _set_deprecation_headers(response)
+        resolved_tenant = tenant_id.strip() if tenant_id is not None else _tenant_id(request)
+        if not resolved_tenant:
+            resolved_tenant = _tenant_id(request)
+        resolved_region = (region or _region_from_request(request)).strip().lower()
+        return _validate_data_residency(resolved_tenant, resolved_region)
+
+    @app.get(f"{API_V1_PREFIX}/data-residency/{{tenant_id}}", response_model=DataResidencyPolicyResponse)
+    def get_data_residency_policy_v1(tenant_id: str) -> DataResidencyPolicyResponse:
+        return _get_data_residency_policy(tenant_id)
+
+    @app.get("/data-residency/{tenant_id}", response_model=DataResidencyPolicyResponse, deprecated=True)
+    def get_data_residency_policy_legacy(tenant_id: str, response: Response) -> DataResidencyPolicyResponse:
+        _set_deprecation_headers(response)
+        return _get_data_residency_policy(tenant_id)
 
     @app.post(f"{API_V1_PREFIX}/drift/samples", response_model=DriftStatusResponse)
     def ingest_drift_sample_v1(payload: DriftSampleRequest, request: Request) -> DriftStatusResponse:
