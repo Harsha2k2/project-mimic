@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from enum import Enum
 import os
 from threading import Event, Thread
@@ -152,6 +153,8 @@ class DecideResponse(APIPayloadModel):
 class APIErrorCode(str, Enum):
     VALIDATION_ERROR = "VALIDATION_ERROR"
     REQUEST_VALIDATION_ERROR = "REQUEST_VALIDATION_ERROR"
+    REQUEST_TOO_LARGE = "REQUEST_TOO_LARGE"
+    REQUEST_TIMEOUT = "REQUEST_TIMEOUT"
     UNAUTHORIZED = "UNAUTHORIZED"
     FORBIDDEN = "FORBIDDEN"
     RATE_LIMITED = "RATE_LIMITED"
@@ -266,6 +269,8 @@ def create_app() -> FastAPI:
     }
     rate_limit_per_minute = int(os.getenv("API_RATE_LIMIT_PER_MINUTE", "0"))
     daily_quota = int(os.getenv("API_DAILY_QUOTA", "0"))
+    max_request_body_bytes = int(os.getenv("API_MAX_REQUEST_BODY_BYTES", "0"))
+    request_timeout_seconds = float(os.getenv("API_REQUEST_TIMEOUT_SECONDS", "0"))
     tenant_minute_counters: dict[tuple[str, int], int] = {}
     tenant_daily_counters: dict[tuple[str, int], int] = {}
     audit_events: list[dict[str, Any]] = []
@@ -466,6 +471,28 @@ def create_app() -> FastAPI:
         response.headers["X-Correlation-ID"] = request_id
         if retry_after is not None:
             response.headers["Retry-After"] = str(retry_after)
+        return response
+
+    def _reject_request_too_large(request: Request, request_id: str) -> JSONResponse:
+        response = _error_response(
+            request,
+            status_code=413,
+            code=APIErrorCode.REQUEST_TOO_LARGE,
+            message="request body exceeds maximum allowed size",
+        )
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Correlation-ID"] = request_id
+        return response
+
+    def _reject_request_timeout(request: Request, request_id: str) -> JSONResponse:
+        response = _error_response(
+            request,
+            status_code=504,
+            code=APIErrorCode.REQUEST_TIMEOUT,
+            message="request exceeded timeout budget",
+        )
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Correlation-ID"] = request_id
         return response
 
     def _enforce_tenant_limits(request: Request, request_id: str, tenant_id: str) -> JSONResponse | None:
@@ -762,6 +789,19 @@ def create_app() -> FastAPI:
         request_id = request.headers.get("x-request-id") or str(uuid4())
         request.state.request_id = request_id
 
+        if max_request_body_bytes > 0:
+            content_length = request.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    if int(content_length) > max_request_body_bytes:
+                        return _reject_request_too_large(request, request_id)
+                except ValueError:
+                    pass
+
+            body = await request.body()
+            if len(body) > max_request_body_bytes:
+                return _reject_request_too_large(request, request_id)
+
         if key_id_by_secret and not _is_auth_exempt_path(request.url.path):
             provided_key = request.headers.get("x-api-key", "")
             key_record = _lookup_active_key(provided_key)
@@ -832,7 +872,18 @@ def create_app() -> FastAPI:
             trace_id=request_id,
             attributes={"path": request.url.path, "method": request.method},
         ):
-            response = await call_next(request)
+            try:
+                if request_timeout_seconds > 0:
+                    response = await asyncio.wait_for(call_next(request), timeout=request_timeout_seconds)
+                else:
+                    response = await call_next(request)
+            except asyncio.TimeoutError:
+                elapsed_ms = (time.perf_counter() - start) * 1000.0
+                metrics.record(request.url.path, 504, elapsed_ms)
+                timeout_response = _reject_request_timeout(request, request_id)
+                timeout_response.headers["X-Request-ID"] = request_id
+                timeout_response.headers["X-Correlation-ID"] = request_id
+                return timeout_response
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         metrics.record(request.url.path, response.status_code, elapsed_ms)
         response.headers["X-Request-ID"] = request_id

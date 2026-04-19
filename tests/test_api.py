@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import time
 
 from project_mimic.api import create_app
 
@@ -434,6 +435,39 @@ def test_api_key_lifecycle_create_rotate_revoke(monkeypatch) -> None:
         json={"goal": "revoked", "max_steps": 2},
     )
     assert revoked_denied.status_code == 401
+
+
+def test_request_size_limit_returns_413(monkeypatch) -> None:
+    monkeypatch.setenv("API_MAX_REQUEST_BODY_BYTES", "32")
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v1/decision/click",
+        content=(
+            b'{"entities":[{"entity_id":"e1","label":"Search","role":"button","text":"Search Flights",'
+            b'"confidence":0.9,"bbox":{"x":100,"y":100,"width":120,"height":40}}],'
+            b'"dom_nodes":[]}'
+        ),
+    )
+
+    assert response.status_code == 413
+    assert response.json()["error"]["code"] == "REQUEST_TOO_LARGE"
+
+
+def test_request_timeout_returns_504(monkeypatch) -> None:
+    monkeypatch.setenv("API_REQUEST_TIMEOUT_SECONDS", "0.01")
+    app = create_app()
+
+    @app.get("/slow-test")
+    def slow_test() -> dict[str, bool]:
+        time.sleep(0.05)
+        return {"ok": True}
+
+    client = TestClient(app)
+
+    response = client.get("/slow-test")
+    assert response.status_code == 504
+    assert response.json()["error"]["code"] == "REQUEST_TIMEOUT"
 
 
 def test_audit_logs_capture_mutations_and_require_admin(monkeypatch) -> None:
