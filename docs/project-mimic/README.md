@@ -76,6 +76,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/60-customer-facing-sla-and-status-portal.md`
   - `lld/61-enterprise-sso-oidc-saml-and-scim-provisioning.md`
   - `lld/62-partner-integration-templates-and-managed-connectors.md`
+  - `lld/63-workflow-marketplace-for-reusable-automation-recipes.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

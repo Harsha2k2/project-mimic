@@ -112,6 +112,11 @@ from .webhooks import (
     JsonFileWebhookSubscriptionStore,
     LifecycleEventWebhookPublisher,
 )
+from .workflow_marketplace import (
+    InMemoryWorkflowMarketplaceStore,
+    JsonFileWorkflowMarketplaceStore,
+    WorkflowMarketplaceService,
+)
 from .vision.grounding import BBox, DOMNode, UIEntity
 from .vision.triton_client import TritonConfig, TritonVisionClient
 
@@ -1462,6 +1467,82 @@ class ConnectorHealthResponse(APIPayloadModel):
     last_error: str | None = None
 
 
+class WorkflowRecipeUpsertRequest(APIPayloadModel):
+    title: str
+    category: str
+    description: str
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    min_role: str = "operator"
+    version: str = "1.0.0"
+    published: bool = True
+
+
+class WorkflowRecipeResponse(APIPayloadModel):
+    recipe_id: str
+    title: str
+    category: str
+    description: str
+    steps: list[dict[str, Any]] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list)
+    min_role: str
+    version: str
+    published: bool
+    created_at: float
+    updated_at: float
+
+
+class WorkflowRecipeListResponse(APIPayloadModel):
+    items: list[WorkflowRecipeResponse]
+    total: int
+
+
+class WorkflowInstallCreateRequest(APIPayloadModel):
+    recipe_id: str
+    parameters: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class WorkflowInstallResponse(APIPayloadModel):
+    install_id: str
+    tenant_id: str
+    recipe_id: str
+    recipe_version: str
+    parameters: dict[str, str] = Field(default_factory=dict)
+    enabled: bool
+    created_at: float
+    updated_at: float
+
+
+class WorkflowInstallListResponse(APIPayloadModel):
+    items: list[WorkflowInstallResponse]
+    total: int
+
+
+class WorkflowRunRequest(APIPayloadModel):
+    initiated_by: str
+    dry_run: bool = False
+
+
+class WorkflowRunResponse(APIPayloadModel):
+    run_id: str
+    tenant_id: str
+    install_id: str
+    recipe_id: str
+    recipe_version: str
+    initiated_by: str
+    dry_run: bool
+    step_results: list[dict[str, Any]] = Field(default_factory=list)
+    status: str
+    started_at: float
+    finished_at: float
+
+
+class WorkflowRunListResponse(APIPayloadModel):
+    items: list[WorkflowRunResponse]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1581,6 +1662,8 @@ def create_app() -> FastAPI:
     identity_federation_file_path = os.getenv("IDENTITY_FEDERATION_FILE_PATH", "")
     managed_connector_store_type = os.getenv("MANAGED_CONNECTOR_STORE", "memory").strip().lower()
     managed_connector_file_path = os.getenv("MANAGED_CONNECTOR_FILE_PATH", "")
+    workflow_marketplace_store_type = os.getenv("WORKFLOW_MARKETPLACE_STORE", "memory").strip().lower()
+    workflow_marketplace_file_path = os.getenv("WORKFLOW_MARKETPLACE_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -1833,6 +1916,13 @@ def create_app() -> FastAPI:
     else:
         managed_connector_store = InMemoryManagedConnectorStore()
 
+    if workflow_marketplace_store_type == "file":
+        if not workflow_marketplace_file_path:
+            raise RuntimeError("WORKFLOW_MARKETPLACE_FILE_PATH is required when WORKFLOW_MARKETPLACE_STORE=file")
+        workflow_marketplace_store = JsonFileWorkflowMarketplaceStore(workflow_marketplace_file_path)
+    else:
+        workflow_marketplace_store = InMemoryWorkflowMarketplaceStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -1979,6 +2069,7 @@ def create_app() -> FastAPI:
     status_portal = CustomerStatusPortalService(store=status_portal_store)
     identity_federation = EnterpriseIdentityFederationService(store=identity_federation_store)
     partner_integrations = PartnerIntegrationService(store=managed_connector_store)
+    workflow_marketplace = WorkflowMarketplaceService(store=workflow_marketplace_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -2107,6 +2198,12 @@ def create_app() -> FastAPI:
                 return "operator"
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/connectors/instances") or path.startswith("/connectors/instances"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/workflows/marketplace/recipes") or path.startswith("/workflows/marketplace/recipes"):
+            if method.upper() in {"GET"}:
+                return "operator"
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/workflows/marketplace") or path.startswith("/workflows/marketplace"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -4812,6 +4909,179 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=message) from exc
 
         return _to_connector_health_response(health)
+
+    def _to_workflow_recipe_response(payload: dict[str, Any]) -> WorkflowRecipeResponse:
+        return WorkflowRecipeResponse(
+            recipe_id=str(payload.get("recipe_id", "")),
+            title=str(payload.get("title", "")),
+            category=str(payload.get("category", "")),
+            description=str(payload.get("description", "")),
+            steps=[
+                dict(item)
+                for item in payload.get("steps", [])
+                if isinstance(item, dict)
+            ],
+            tags=[
+                str(item)
+                for item in payload.get("tags", [])
+                if isinstance(item, str)
+            ],
+            min_role=str(payload.get("min_role", "operator")),
+            version=str(payload.get("version", "1.0.0")),
+            published=bool(payload.get("published", False)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_workflow_install_response(payload: dict[str, Any]) -> WorkflowInstallResponse:
+        return WorkflowInstallResponse(
+            install_id=str(payload.get("install_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            recipe_id=str(payload.get("recipe_id", "")),
+            recipe_version=str(payload.get("recipe_version", "")),
+            parameters={
+                str(key): str(value)
+                for key, value in dict(payload.get("parameters", {})).items()
+            },
+            enabled=bool(payload.get("enabled", False)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_workflow_run_response(payload: dict[str, Any]) -> WorkflowRunResponse:
+        return WorkflowRunResponse(
+            run_id=str(payload.get("run_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            install_id=str(payload.get("install_id", "")),
+            recipe_id=str(payload.get("recipe_id", "")),
+            recipe_version=str(payload.get("recipe_version", "")),
+            initiated_by=str(payload.get("initiated_by", "")),
+            dry_run=bool(payload.get("dry_run", False)),
+            step_results=[
+                dict(item)
+                for item in payload.get("step_results", [])
+                if isinstance(item, dict)
+            ],
+            status=str(payload.get("status", "unknown")),
+            started_at=float(payload.get("started_at", 0.0)),
+            finished_at=float(payload.get("finished_at", 0.0)),
+        )
+
+    def _upsert_workflow_recipe(
+        recipe_id: str,
+        payload: WorkflowRecipeUpsertRequest,
+    ) -> WorkflowRecipeResponse:
+        try:
+            recipe = workflow_marketplace.upsert_recipe(
+                recipe_id=recipe_id,
+                title=payload.title,
+                category=payload.category,
+                description=payload.description,
+                steps=payload.steps,
+                tags=payload.tags,
+                min_role=payload.min_role,
+                version=payload.version,
+                published=payload.published,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_workflow_recipe_response(recipe)
+
+    def _list_workflow_recipes(
+        category: str | None = None,
+        tag: str | None = None,
+        include_unpublished: bool = False,
+    ) -> WorkflowRecipeListResponse:
+        recipes = workflow_marketplace.list_recipes(
+            category=category,
+            tag=tag,
+            include_unpublished=include_unpublished,
+        )
+        items = [_to_workflow_recipe_response(item) for item in recipes]
+        return WorkflowRecipeListResponse(items=items, total=len(items))
+
+    def _get_workflow_recipe(recipe_id: str) -> WorkflowRecipeResponse:
+        try:
+            recipe = workflow_marketplace.get_recipe(recipe_id=recipe_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if recipe is None:
+            raise HTTPException(status_code=404, detail="workflow recipe not found")
+        return _to_workflow_recipe_response(recipe)
+
+    def _install_workflow_recipe(
+        install_id: str,
+        payload: WorkflowInstallCreateRequest,
+        request: Request,
+    ) -> WorkflowInstallResponse:
+        try:
+            install = workflow_marketplace.install_recipe(
+                tenant_id=_tenant_id(request),
+                recipe_id=payload.recipe_id,
+                install_id=install_id,
+                parameters=payload.parameters,
+                enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_workflow_install_response(install)
+
+    def _list_workflow_installs(
+        request: Request,
+        enabled: bool | None = None,
+    ) -> WorkflowInstallListResponse:
+        try:
+            installs = workflow_marketplace.list_installs(
+                tenant_id=_tenant_id(request),
+                enabled=enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_workflow_install_response(item) for item in installs]
+        return WorkflowInstallListResponse(items=items, total=len(items))
+
+    def _run_workflow_install(
+        install_id: str,
+        payload: WorkflowRunRequest,
+        request: Request,
+    ) -> WorkflowRunResponse:
+        try:
+            run = workflow_marketplace.run_install(
+                tenant_id=_tenant_id(request),
+                install_id=install_id,
+                initiated_by=payload.initiated_by,
+                dry_run=payload.dry_run,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"install not found", "install does not belong to tenant"}:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+
+        return _to_workflow_run_response(run)
+
+    def _list_workflow_runs(request: Request, limit: int) -> WorkflowRunListResponse:
+        try:
+            runs = workflow_marketplace.list_runs(tenant_id=_tenant_id(request), limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_workflow_run_response(item) for item in runs]
+        return WorkflowRunListResponse(items=items, total=len(items))
+
+    def _get_workflow_run(run_id: str, request: Request) -> WorkflowRunResponse:
+        try:
+            run = workflow_marketplace.get_run(run_id=run_id, tenant_id=_tenant_id(request))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if run is None:
+            raise HTTPException(status_code=404, detail="workflow run not found")
+        return _to_workflow_run_response(run)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -9320,6 +9590,255 @@ def create_app() -> FastAPI:
             },
         )
         return health
+
+
+    @app.post(
+        f"{API_V1_PREFIX}/workflows/marketplace/recipes/{{recipe_id}}",
+        response_model=WorkflowRecipeResponse,
+    )
+    def upsert_workflow_recipe_v1(
+        recipe_id: str,
+        payload: WorkflowRecipeUpsertRequest,
+        request: Request,
+    ) -> WorkflowRecipeResponse:
+        recipe = _upsert_workflow_recipe(recipe_id, payload)
+        _append_audit_event(
+            request,
+            action="workflow.marketplace.recipe.upsert",
+            resource_type="workflow_recipe",
+            resource_id=recipe.recipe_id,
+            details={"category": recipe.category, "version": recipe.version, "published": recipe.published},
+        )
+        return recipe
+
+    @app.post(
+        "/workflows/marketplace/recipes/{recipe_id}",
+        response_model=WorkflowRecipeResponse,
+        deprecated=True,
+    )
+    def upsert_workflow_recipe_legacy(
+        recipe_id: str,
+        payload: WorkflowRecipeUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> WorkflowRecipeResponse:
+        _set_deprecation_headers(response)
+        recipe = _upsert_workflow_recipe(recipe_id, payload)
+        _append_audit_event(
+            request,
+            action="workflow.marketplace.recipe.upsert",
+            resource_type="workflow_recipe",
+            resource_id=recipe.recipe_id,
+            details={"category": recipe.category, "version": recipe.version, "published": recipe.published},
+        )
+        return recipe
+
+    @app.get(
+        f"{API_V1_PREFIX}/workflows/marketplace/recipes",
+        response_model=WorkflowRecipeListResponse,
+    )
+    def list_workflow_recipes_v1(
+        category: str | None = Query(default=None),
+        tag: str | None = Query(default=None),
+        include_unpublished: bool = Query(default=False),
+    ) -> WorkflowRecipeListResponse:
+        return _list_workflow_recipes(category=category, tag=tag, include_unpublished=include_unpublished)
+
+    @app.get(
+        "/workflows/marketplace/recipes",
+        response_model=WorkflowRecipeListResponse,
+        deprecated=True,
+    )
+    def list_workflow_recipes_legacy(
+        response: Response,
+        category: str | None = Query(default=None),
+        tag: str | None = Query(default=None),
+        include_unpublished: bool = Query(default=False),
+    ) -> WorkflowRecipeListResponse:
+        _set_deprecation_headers(response)
+        return _list_workflow_recipes(category=category, tag=tag, include_unpublished=include_unpublished)
+
+    @app.get(
+        f"{API_V1_PREFIX}/workflows/marketplace/recipes/{{recipe_id}}",
+        response_model=WorkflowRecipeResponse,
+    )
+    def get_workflow_recipe_v1(recipe_id: str) -> WorkflowRecipeResponse:
+        return _get_workflow_recipe(recipe_id)
+
+    @app.get(
+        "/workflows/marketplace/recipes/{recipe_id}",
+        response_model=WorkflowRecipeResponse,
+        deprecated=True,
+    )
+    def get_workflow_recipe_legacy(
+        recipe_id: str,
+        response: Response,
+    ) -> WorkflowRecipeResponse:
+        _set_deprecation_headers(response)
+        return _get_workflow_recipe(recipe_id)
+
+    @app.post(
+        f"{API_V1_PREFIX}/workflows/marketplace/installs/{{install_id}}",
+        response_model=WorkflowInstallResponse,
+    )
+    def install_workflow_recipe_v1(
+        install_id: str,
+        payload: WorkflowInstallCreateRequest,
+        request: Request,
+    ) -> WorkflowInstallResponse:
+        install = _install_workflow_recipe(install_id, payload, request)
+        _append_audit_event(
+            request,
+            action="workflow.marketplace.install.create",
+            resource_type="workflow_install",
+            resource_id=install.install_id,
+            details={"recipe_id": install.recipe_id, "enabled": install.enabled},
+        )
+        return install
+
+    @app.post(
+        "/workflows/marketplace/installs/{install_id}",
+        response_model=WorkflowInstallResponse,
+        deprecated=True,
+    )
+    def install_workflow_recipe_legacy(
+        install_id: str,
+        payload: WorkflowInstallCreateRequest,
+        response: Response,
+        request: Request,
+    ) -> WorkflowInstallResponse:
+        _set_deprecation_headers(response)
+        install = _install_workflow_recipe(install_id, payload, request)
+        _append_audit_event(
+            request,
+            action="workflow.marketplace.install.create",
+            resource_type="workflow_install",
+            resource_id=install.install_id,
+            details={"recipe_id": install.recipe_id, "enabled": install.enabled},
+        )
+        return install
+
+    @app.get(
+        f"{API_V1_PREFIX}/workflows/marketplace/installs",
+        response_model=WorkflowInstallListResponse,
+    )
+    def list_workflow_installs_v1(
+        request: Request,
+        enabled: bool | None = Query(default=None),
+    ) -> WorkflowInstallListResponse:
+        return _list_workflow_installs(request, enabled=enabled)
+
+    @app.get(
+        "/workflows/marketplace/installs",
+        response_model=WorkflowInstallListResponse,
+        deprecated=True,
+    )
+    def list_workflow_installs_legacy(
+        response: Response,
+        request: Request,
+        enabled: bool | None = Query(default=None),
+    ) -> WorkflowInstallListResponse:
+        _set_deprecation_headers(response)
+        return _list_workflow_installs(request, enabled=enabled)
+
+    @app.post(
+        f"{API_V1_PREFIX}/workflows/marketplace/installs/{{install_id}}/run",
+        response_model=WorkflowRunResponse,
+    )
+    def run_workflow_install_v1(
+        install_id: str,
+        payload: WorkflowRunRequest,
+        request: Request,
+    ) -> WorkflowRunResponse:
+        run = _run_workflow_install(install_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="workflow_marketplace_run", units=1.0)
+        _append_audit_event(
+            request,
+            action="workflow.marketplace.run",
+            resource_type="workflow_run",
+            resource_id=run.run_id,
+            details={"install_id": run.install_id, "dry_run": run.dry_run, "status": run.status},
+        )
+        _publish_realtime_event(
+            event_type="workflow.marketplace.run.completed",
+            tenant_id=_tenant_id(request),
+            payload={"run_id": run.run_id, "install_id": run.install_id, "status": run.status},
+        )
+        return run
+
+    @app.post(
+        "/workflows/marketplace/installs/{install_id}/run",
+        response_model=WorkflowRunResponse,
+        deprecated=True,
+    )
+    def run_workflow_install_legacy(
+        install_id: str,
+        payload: WorkflowRunRequest,
+        response: Response,
+        request: Request,
+    ) -> WorkflowRunResponse:
+        _set_deprecation_headers(response)
+        run = _run_workflow_install(install_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="workflow_marketplace_run", units=1.0)
+        _append_audit_event(
+            request,
+            action="workflow.marketplace.run",
+            resource_type="workflow_run",
+            resource_id=run.run_id,
+            details={"install_id": run.install_id, "dry_run": run.dry_run, "status": run.status},
+        )
+        _publish_realtime_event(
+            event_type="workflow.marketplace.run.completed",
+            tenant_id=_tenant_id(request),
+            payload={"run_id": run.run_id, "install_id": run.install_id, "status": run.status},
+        )
+        return run
+
+    @app.get(
+        f"{API_V1_PREFIX}/workflows/marketplace/runs",
+        response_model=WorkflowRunListResponse,
+    )
+    def list_workflow_runs_v1(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> WorkflowRunListResponse:
+        return _list_workflow_runs(request, limit)
+
+    @app.get(
+        "/workflows/marketplace/runs",
+        response_model=WorkflowRunListResponse,
+        deprecated=True,
+    )
+    def list_workflow_runs_legacy(
+        response: Response,
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> WorkflowRunListResponse:
+        _set_deprecation_headers(response)
+        return _list_workflow_runs(request, limit)
+
+    @app.get(
+        f"{API_V1_PREFIX}/workflows/marketplace/runs/{{run_id}}",
+        response_model=WorkflowRunResponse,
+    )
+    def get_workflow_run_v1(
+        run_id: str,
+        request: Request,
+    ) -> WorkflowRunResponse:
+        return _get_workflow_run(run_id, request)
+
+    @app.get(
+        "/workflows/marketplace/runs/{run_id}",
+        response_model=WorkflowRunResponse,
+        deprecated=True,
+    )
+    def get_workflow_run_legacy(
+        run_id: str,
+        response: Response,
+        request: Request,
+    ) -> WorkflowRunResponse:
+        _set_deprecation_headers(response)
+        return _get_workflow_run(run_id, request)
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:

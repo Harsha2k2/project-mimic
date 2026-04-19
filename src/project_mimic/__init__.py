@@ -173,6 +173,11 @@ from .status_portal import (
 from .synthetic_monitoring import SyntheticMonitor, SyntheticMonitoringError
 from .tasks import TaskDefinition, TaskDifficulty, TaskEvidence, grade_task, task_catalog
 from .testing import EphemeralIntegrationEnvironment, ephemeral_integration_environment
+from .workflow_marketplace import (
+    InMemoryWorkflowMarketplaceStore,
+    JsonFileWorkflowMarketplaceStore,
+    WorkflowMarketplaceService,
+)
 
 __all__ = [
     "ActionType",
@@ -340,6 +345,9 @@ __all__ = [
     "synthesize_typing_stream",
     "task_catalog",
     "ephemeral_integration_environment",
+    "InMemoryWorkflowMarketplaceStore",
+    "JsonFileWorkflowMarketplaceStore",
+    "WorkflowMarketplaceService",
     "load_yaml_dict",
     "retry_with_backoff",
 ]
