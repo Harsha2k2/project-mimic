@@ -115,3 +115,34 @@ def test_json_queue_store_restores_dead_letter_jobs_after_reinit(tmp_path) -> No
     dead = reloaded.list_dead_letter()
     assert len(dead) == 1
     assert dead[0].job_id == job.job_id
+
+
+def test_idempotency_key_expires_after_ttl() -> None:
+    clock = _Clock(start=2000.0)
+    queue = InMemoryActionQueue(now_fn=clock.now, idempotency_ttl_seconds=5)
+
+    first = queue.dispatch({"action": "click"}, idempotency_key="ttl-key")
+    second = queue.dispatch({"action": "click"}, idempotency_key="ttl-key")
+    assert first.job_id == second.job_id
+
+    clock.advance(6)
+    third = queue.dispatch({"action": "click"}, idempotency_key="ttl-key")
+    assert third.job_id != first.job_id
+
+
+def test_idempotency_ttl_persists_across_reinit(tmp_path) -> None:
+    clock = _Clock(start=3000.0)
+    store_path = tmp_path / "queue-store.json"
+    store = JsonFileQueueStore(str(store_path))
+
+    queue = InMemoryActionQueue(now_fn=clock.now, store=store, idempotency_ttl_seconds=10)
+    first = queue.dispatch({"action": "type"}, idempotency_key="persist-key")
+
+    reloaded = InMemoryActionQueue(now_fn=clock.now, store=store, idempotency_ttl_seconds=10)
+    second = reloaded.dispatch({"action": "type"}, idempotency_key="persist-key")
+    assert second.job_id == first.job_id
+
+    clock.advance(11)
+    after_expiry = InMemoryActionQueue(now_fn=clock.now, store=store, idempotency_ttl_seconds=10)
+    third = after_expiry.dispatch({"action": "type"}, idempotency_key="persist-key")
+    assert third.job_id != first.job_id

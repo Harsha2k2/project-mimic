@@ -105,11 +105,20 @@ class JsonFileQueueStore:
 class InMemoryActionQueue:
     """Queue runtime with worker leases, dead-lettering, and replay support."""
 
-    def __init__(self, now_fn=time.time, store: QueueStore | None = None) -> None:
+    def __init__(
+        self,
+        now_fn=time.time,
+        store: QueueStore | None = None,
+        idempotency_ttl_seconds: int = 3600,
+    ) -> None:
         self._now = now_fn
         self._store = store or InMemoryQueueStore()
+        if idempotency_ttl_seconds <= 0:
+            raise ValueError("idempotency_ttl_seconds must be positive")
+        self._idempotency_ttl_seconds = idempotency_ttl_seconds
         self._jobs: dict[str, ActionJob] = {}
         self._idempotency: dict[str, str] = {}
+        self._idempotency_expires: dict[str, float] = {}
         self._ready: deque[str] = deque()
         self._dead_letter: deque[str] = deque()
         self._leases: dict[str, WorkerLease] = {}
@@ -119,6 +128,8 @@ class InMemoryActionQueue:
         key = idempotency_key.strip()
         if not key:
             raise ValueError("idempotency_key is required")
+
+        self._cleanup_expired_idempotency()
 
         existing_job_id = self._idempotency.get(key)
         if existing_job_id:
@@ -136,6 +147,7 @@ class InMemoryActionQueue:
         )
         self._jobs[job.job_id] = job
         self._idempotency[key] = job.job_id
+        self._idempotency_expires[key] = now + self._idempotency_ttl_seconds
         self._ready.append(job.job_id)
         self._persist_state()
         return job
@@ -303,6 +315,7 @@ class InMemoryActionQueue:
         payload = {
             "jobs": {job_id: job.model_dump(mode="json") for job_id, job in self._jobs.items()},
             "idempotency": dict(self._idempotency),
+            "idempotency_expires": dict(self._idempotency_expires),
             "ready": list(self._ready),
             "dead_letter": list(self._dead_letter),
             "leases": {job_id: lease.model_dump(mode="json") for job_id, lease in self._leases.items()},
@@ -316,6 +329,7 @@ class InMemoryActionQueue:
 
         jobs_payload = payload.get("jobs", {})
         idempotency_payload = payload.get("idempotency", {})
+        idempotency_expires_payload = payload.get("idempotency_expires", {})
         ready_payload = payload.get("ready", [])
         dead_letter_payload = payload.get("dead_letter", [])
         leases_payload = payload.get("leases", {})
@@ -331,6 +345,15 @@ class InMemoryActionQueue:
                 for key, value in idempotency_payload.items()
                 if isinstance(key, str) and isinstance(value, str)
             }
+
+        if isinstance(idempotency_expires_payload, dict):
+            self._idempotency_expires = {
+                str(key): float(value)
+                for key, value in idempotency_expires_payload.items()
+                if isinstance(key, str)
+            }
+
+        self._cleanup_expired_idempotency()
 
         if isinstance(ready_payload, list):
             self._ready = deque(
@@ -350,3 +373,10 @@ class InMemoryActionQueue:
             for job_id, data in leases_payload.items():
                 if isinstance(job_id, str) and isinstance(data, dict) and job_id in self._jobs:
                     self._leases[job_id] = WorkerLease(**data)
+
+    def _cleanup_expired_idempotency(self) -> None:
+        now = self._now()
+        expired_keys = [key for key, expires_at in self._idempotency_expires.items() if expires_at <= now]
+        for key in expired_keys:
+            self._idempotency_expires.pop(key, None)
+            self._idempotency.pop(key, None)
