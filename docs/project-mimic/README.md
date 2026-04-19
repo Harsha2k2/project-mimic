@@ -41,6 +41,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/25-canary-deployment-with-automatic-rollback-on-slo-breach.md`
   - `lld/26-deployment-pipeline-gates-for-helm-and-manifest-policy-checks.md`
   - `lld/27-end-to-end-tests-with-real-browser-workers-in-ci.md`
+  - `lld/28-integration-lane-with-real-triton-gpu-inference-path.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
