@@ -25,6 +25,7 @@ from .autonomous_remediation import (
     InMemoryAutonomousRemediationStore,
     JsonFileAutonomousRemediationStore,
 )
+from .benchmark_lab import BenchmarkLabService, InMemoryBenchmarkLabStore, JsonFileBenchmarkLabStore
 from .benchmarking import BenchmarkReport, BenchmarkTaskResult, run_benchmark
 from .cluster_chaos import ChaosScenario, ClusterChaosTestSuite, REQUIRED_FAULT_CLASSES
 from .cost_aware_scheduler import (
@@ -345,6 +346,9 @@ __all__ = [
     "synthesize_typing_stream",
     "task_catalog",
     "ephemeral_integration_environment",
+    "BenchmarkLabService",
+    "InMemoryBenchmarkLabStore",
+    "JsonFileBenchmarkLabStore",
     "InMemoryWorkflowMarketplaceStore",
     "JsonFileWorkflowMarketplaceStore",
     "WorkflowMarketplaceService",

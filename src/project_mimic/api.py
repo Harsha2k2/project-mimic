@@ -27,6 +27,7 @@ from .autonomous_remediation import (
     InMemoryAutonomousRemediationStore,
     JsonFileAutonomousRemediationStore,
 )
+from .benchmark_lab import BenchmarkLabService, InMemoryBenchmarkLabStore, JsonFileBenchmarkLabStore
 from .billing import BillingPrimitives, InMemoryBillingStore, JsonFileBillingStore
 from .cost_aware_scheduler import (
     CostAwareScheduler,
@@ -1543,6 +1544,70 @@ class WorkflowRunListResponse(APIPayloadModel):
     total: int
 
 
+class BenchmarkSuiteUpsertRequest(APIPayloadModel):
+    name: str
+    description: str
+    task_ids: list[str] = Field(default_factory=list)
+    score_regression_threshold: float = Field(default=0.02, ge=0.0)
+    latency_regression_threshold_ms: float = Field(default=40.0, ge=0.0)
+    sample_count: int = Field(default=3, ge=1)
+    deterministic_seed: int = 42
+    active: bool = True
+
+
+class BenchmarkSuiteResponse(APIPayloadModel):
+    suite_id: str
+    name: str
+    description: str
+    task_ids: list[str] = Field(default_factory=list)
+    score_regression_threshold: float
+    latency_regression_threshold_ms: float
+    sample_count: int
+    deterministic_seed: int
+    active: bool
+    created_at: float
+    updated_at: float
+
+
+class BenchmarkSuiteListResponse(APIPayloadModel):
+    items: list[BenchmarkSuiteResponse]
+    total: int
+
+
+class BenchmarkComparisonRunRequest(APIPayloadModel):
+    suite_id: str
+    baseline_version: str
+    candidate_version: str
+    initiated_by: str
+    deterministic_seed: int | None = None
+    sample_count: int | None = Field(default=None, ge=1)
+
+
+class BenchmarkComparisonRunResponse(APIPayloadModel):
+    run_id: str
+    tenant_id: str
+    suite_id: str
+    baseline_version: str
+    candidate_version: str
+    initiated_by: str
+    deterministic_seed: int
+    sample_count: int
+    task_comparisons: list[dict[str, Any]] = Field(default_factory=list)
+    regression_count: int
+    improvement_count: int
+    score_delta_mean: float
+    latency_delta_mean_ms: float
+    status: str
+    reproducibility_fingerprint: str
+    started_at: float
+    finished_at: float
+
+
+class BenchmarkComparisonRunListResponse(APIPayloadModel):
+    items: list[BenchmarkComparisonRunResponse]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1664,6 +1729,8 @@ def create_app() -> FastAPI:
     managed_connector_file_path = os.getenv("MANAGED_CONNECTOR_FILE_PATH", "")
     workflow_marketplace_store_type = os.getenv("WORKFLOW_MARKETPLACE_STORE", "memory").strip().lower()
     workflow_marketplace_file_path = os.getenv("WORKFLOW_MARKETPLACE_FILE_PATH", "")
+    benchmark_lab_store_type = os.getenv("BENCHMARK_LAB_STORE", "memory").strip().lower()
+    benchmark_lab_file_path = os.getenv("BENCHMARK_LAB_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -1923,6 +1990,13 @@ def create_app() -> FastAPI:
     else:
         workflow_marketplace_store = InMemoryWorkflowMarketplaceStore()
 
+    if benchmark_lab_store_type == "file":
+        if not benchmark_lab_file_path:
+            raise RuntimeError("BENCHMARK_LAB_FILE_PATH is required when BENCHMARK_LAB_STORE=file")
+        benchmark_lab_store = JsonFileBenchmarkLabStore(benchmark_lab_file_path)
+    else:
+        benchmark_lab_store = InMemoryBenchmarkLabStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -2070,6 +2144,7 @@ def create_app() -> FastAPI:
     identity_federation = EnterpriseIdentityFederationService(store=identity_federation_store)
     partner_integrations = PartnerIntegrationService(store=managed_connector_store)
     workflow_marketplace = WorkflowMarketplaceService(store=workflow_marketplace_store)
+    benchmark_lab = BenchmarkLabService(store=benchmark_lab_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -2204,6 +2279,14 @@ def create_app() -> FastAPI:
                 return "operator"
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/workflows/marketplace") or path.startswith("/workflows/marketplace"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/benchmarks/lab/suites") or path.startswith("/benchmarks/lab/suites"):
+            if method.upper() in {"GET"}:
+                return "operator"
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/benchmarks/lab/runs") or path.startswith("/benchmarks/lab/runs"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/benchmarks/lab") or path.startswith("/benchmarks/lab"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -5082,6 +5165,135 @@ def create_app() -> FastAPI:
         if run is None:
             raise HTTPException(status_code=404, detail="workflow run not found")
         return _to_workflow_run_response(run)
+
+    def _to_benchmark_suite_response(payload: dict[str, Any]) -> BenchmarkSuiteResponse:
+        return BenchmarkSuiteResponse(
+            suite_id=str(payload.get("suite_id", "")),
+            name=str(payload.get("name", "")),
+            description=str(payload.get("description", "")),
+            task_ids=[str(item) for item in payload.get("task_ids", []) if isinstance(item, str)],
+            score_regression_threshold=float(payload.get("score_regression_threshold", 0.0)),
+            latency_regression_threshold_ms=float(payload.get("latency_regression_threshold_ms", 0.0)),
+            sample_count=int(payload.get("sample_count", 0)),
+            deterministic_seed=int(payload.get("deterministic_seed", 0)),
+            active=bool(payload.get("active", False)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_benchmark_run_response(payload: dict[str, Any]) -> BenchmarkComparisonRunResponse:
+        return BenchmarkComparisonRunResponse(
+            run_id=str(payload.get("run_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            suite_id=str(payload.get("suite_id", "")),
+            baseline_version=str(payload.get("baseline_version", "")),
+            candidate_version=str(payload.get("candidate_version", "")),
+            initiated_by=str(payload.get("initiated_by", "")),
+            deterministic_seed=int(payload.get("deterministic_seed", 0)),
+            sample_count=int(payload.get("sample_count", 0)),
+            task_comparisons=[
+                dict(item)
+                for item in payload.get("task_comparisons", [])
+                if isinstance(item, dict)
+            ],
+            regression_count=int(payload.get("regression_count", 0)),
+            improvement_count=int(payload.get("improvement_count", 0)),
+            score_delta_mean=float(payload.get("score_delta_mean", 0.0)),
+            latency_delta_mean_ms=float(payload.get("latency_delta_mean_ms", 0.0)),
+            status=str(payload.get("status", "unknown")),
+            reproducibility_fingerprint=str(payload.get("reproducibility_fingerprint", "")),
+            started_at=float(payload.get("started_at", 0.0)),
+            finished_at=float(payload.get("finished_at", 0.0)),
+        )
+
+    def _upsert_benchmark_suite(
+        suite_id: str,
+        payload: BenchmarkSuiteUpsertRequest,
+    ) -> BenchmarkSuiteResponse:
+        try:
+            suite = benchmark_lab.upsert_suite(
+                suite_id=suite_id,
+                name=payload.name,
+                description=payload.description,
+                task_ids=payload.task_ids,
+                score_regression_threshold=payload.score_regression_threshold,
+                latency_regression_threshold_ms=payload.latency_regression_threshold_ms,
+                sample_count=payload.sample_count,
+                deterministic_seed=payload.deterministic_seed,
+                active=payload.active,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_benchmark_suite_response(suite)
+
+    def _list_benchmark_suites(include_inactive: bool) -> BenchmarkSuiteListResponse:
+        suites = benchmark_lab.list_suites(include_inactive=include_inactive)
+        items = [_to_benchmark_suite_response(item) for item in suites]
+        return BenchmarkSuiteListResponse(items=items, total=len(items))
+
+    def _get_benchmark_suite(suite_id: str) -> BenchmarkSuiteResponse:
+        try:
+            suite = benchmark_lab.get_suite(suite_id=suite_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if suite is None:
+            raise HTTPException(status_code=404, detail="benchmark suite not found")
+        return _to_benchmark_suite_response(suite)
+
+    def _run_benchmark_comparison(
+        run_id: str,
+        payload: BenchmarkComparisonRunRequest,
+        request: Request,
+    ) -> BenchmarkComparisonRunResponse:
+        try:
+            run = benchmark_lab.run_comparison(
+                tenant_id=_tenant_id(request),
+                run_id=run_id,
+                suite_id=payload.suite_id,
+                baseline_version=payload.baseline_version,
+                candidate_version=payload.candidate_version,
+                initiated_by=payload.initiated_by,
+                deterministic_seed=payload.deterministic_seed,
+                sample_count=payload.sample_count,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message == "suite not found":
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+
+        return _to_benchmark_run_response(run)
+
+    def _list_benchmark_runs(
+        request: Request,
+        suite_id: str | None,
+        status: str | None,
+        limit: int,
+    ) -> BenchmarkComparisonRunListResponse:
+        try:
+            runs = benchmark_lab.list_runs(
+                tenant_id=_tenant_id(request),
+                suite_id=suite_id,
+                status=status,
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_benchmark_run_response(item) for item in runs]
+        return BenchmarkComparisonRunListResponse(items=items, total=len(items))
+
+    def _get_benchmark_run(run_id: str, request: Request) -> BenchmarkComparisonRunResponse:
+        try:
+            run = benchmark_lab.get_run(run_id=run_id, tenant_id=_tenant_id(request))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if run is None:
+            raise HTTPException(status_code=404, detail="benchmark run not found")
+        return _to_benchmark_run_response(run)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -9839,6 +10051,200 @@ def create_app() -> FastAPI:
     ) -> WorkflowRunResponse:
         _set_deprecation_headers(response)
         return _get_workflow_run(run_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/benchmarks/lab/suites/{{suite_id}}",
+        response_model=BenchmarkSuiteResponse,
+    )
+    def upsert_benchmark_suite_v1(
+        suite_id: str,
+        payload: BenchmarkSuiteUpsertRequest,
+        request: Request,
+    ) -> BenchmarkSuiteResponse:
+        suite = _upsert_benchmark_suite(suite_id, payload)
+        _append_audit_event(
+            request,
+            action="benchmark.lab.suite.upsert",
+            resource_type="benchmark_suite",
+            resource_id=suite.suite_id,
+            details={"task_count": len(suite.task_ids), "active": suite.active},
+        )
+        return suite
+
+    @app.post(
+        "/benchmarks/lab/suites/{suite_id}",
+        response_model=BenchmarkSuiteResponse,
+        deprecated=True,
+    )
+    def upsert_benchmark_suite_legacy(
+        suite_id: str,
+        payload: BenchmarkSuiteUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> BenchmarkSuiteResponse:
+        _set_deprecation_headers(response)
+        suite = _upsert_benchmark_suite(suite_id, payload)
+        _append_audit_event(
+            request,
+            action="benchmark.lab.suite.upsert",
+            resource_type="benchmark_suite",
+            resource_id=suite.suite_id,
+            details={"task_count": len(suite.task_ids), "active": suite.active},
+        )
+        return suite
+
+    @app.get(
+        f"{API_V1_PREFIX}/benchmarks/lab/suites",
+        response_model=BenchmarkSuiteListResponse,
+    )
+    def list_benchmark_suites_v1(
+        include_inactive: bool = Query(default=False),
+    ) -> BenchmarkSuiteListResponse:
+        return _list_benchmark_suites(include_inactive)
+
+    @app.get(
+        "/benchmarks/lab/suites",
+        response_model=BenchmarkSuiteListResponse,
+        deprecated=True,
+    )
+    def list_benchmark_suites_legacy(
+        response: Response,
+        include_inactive: bool = Query(default=False),
+    ) -> BenchmarkSuiteListResponse:
+        _set_deprecation_headers(response)
+        return _list_benchmark_suites(include_inactive)
+
+    @app.get(
+        f"{API_V1_PREFIX}/benchmarks/lab/suites/{{suite_id}}",
+        response_model=BenchmarkSuiteResponse,
+    )
+    def get_benchmark_suite_v1(suite_id: str) -> BenchmarkSuiteResponse:
+        return _get_benchmark_suite(suite_id)
+
+    @app.get(
+        "/benchmarks/lab/suites/{suite_id}",
+        response_model=BenchmarkSuiteResponse,
+        deprecated=True,
+    )
+    def get_benchmark_suite_legacy(
+        suite_id: str,
+        response: Response,
+    ) -> BenchmarkSuiteResponse:
+        _set_deprecation_headers(response)
+        return _get_benchmark_suite(suite_id)
+
+    @app.post(
+        f"{API_V1_PREFIX}/benchmarks/lab/runs/{{run_id}}",
+        response_model=BenchmarkComparisonRunResponse,
+    )
+    def run_benchmark_comparison_v1(
+        run_id: str,
+        payload: BenchmarkComparisonRunRequest,
+        request: Request,
+    ) -> BenchmarkComparisonRunResponse:
+        run = _run_benchmark_comparison(run_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="benchmark_lab_run", units=1.0)
+        _append_audit_event(
+            request,
+            action="benchmark.lab.run",
+            resource_type="benchmark_run",
+            resource_id=run.run_id,
+            details={
+                "suite_id": run.suite_id,
+                "baseline_version": run.baseline_version,
+                "candidate_version": run.candidate_version,
+                "status": run.status,
+            },
+        )
+        _publish_realtime_event(
+            event_type="benchmark.lab.run.completed",
+            tenant_id=_tenant_id(request),
+            payload={"run_id": run.run_id, "suite_id": run.suite_id, "status": run.status},
+        )
+        return run
+
+    @app.post(
+        "/benchmarks/lab/runs/{run_id}",
+        response_model=BenchmarkComparisonRunResponse,
+        deprecated=True,
+    )
+    def run_benchmark_comparison_legacy(
+        run_id: str,
+        payload: BenchmarkComparisonRunRequest,
+        response: Response,
+        request: Request,
+    ) -> BenchmarkComparisonRunResponse:
+        _set_deprecation_headers(response)
+        run = _run_benchmark_comparison(run_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="benchmark_lab_run", units=1.0)
+        _append_audit_event(
+            request,
+            action="benchmark.lab.run",
+            resource_type="benchmark_run",
+            resource_id=run.run_id,
+            details={
+                "suite_id": run.suite_id,
+                "baseline_version": run.baseline_version,
+                "candidate_version": run.candidate_version,
+                "status": run.status,
+            },
+        )
+        _publish_realtime_event(
+            event_type="benchmark.lab.run.completed",
+            tenant_id=_tenant_id(request),
+            payload={"run_id": run.run_id, "suite_id": run.suite_id, "status": run.status},
+        )
+        return run
+
+    @app.get(
+        f"{API_V1_PREFIX}/benchmarks/lab/runs",
+        response_model=BenchmarkComparisonRunListResponse,
+    )
+    def list_benchmark_runs_v1(
+        request: Request,
+        suite_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> BenchmarkComparisonRunListResponse:
+        return _list_benchmark_runs(request, suite_id=suite_id, status=status, limit=limit)
+
+    @app.get(
+        "/benchmarks/lab/runs",
+        response_model=BenchmarkComparisonRunListResponse,
+        deprecated=True,
+    )
+    def list_benchmark_runs_legacy(
+        response: Response,
+        request: Request,
+        suite_id: str | None = Query(default=None),
+        status: str | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> BenchmarkComparisonRunListResponse:
+        _set_deprecation_headers(response)
+        return _list_benchmark_runs(request, suite_id=suite_id, status=status, limit=limit)
+
+    @app.get(
+        f"{API_V1_PREFIX}/benchmarks/lab/runs/{{run_id}}",
+        response_model=BenchmarkComparisonRunResponse,
+    )
+    def get_benchmark_run_v1(
+        run_id: str,
+        request: Request,
+    ) -> BenchmarkComparisonRunResponse:
+        return _get_benchmark_run(run_id, request)
+
+    @app.get(
+        "/benchmarks/lab/runs/{run_id}",
+        response_model=BenchmarkComparisonRunResponse,
+        deprecated=True,
+    )
+    def get_benchmark_run_legacy(
+        run_id: str,
+        response: Response,
+        request: Request,
+    ) -> BenchmarkComparisonRunResponse:
+        _set_deprecation_headers(response)
+        return _get_benchmark_run(run_id, request)
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
