@@ -32,6 +32,11 @@ from .drift_detection import DriftMonitor
 from .engine import ExecutionEngine
 from .event_stream import EventStreamBroker
 from .feature_flags import FeatureFlagService, InMemoryFeatureFlagStore, JsonFileFeatureFlagStore
+from .governance_controls import (
+    ConsentTargetGovernanceService,
+    InMemoryGovernancePolicyStore,
+    JsonFileGovernancePolicyStore,
+)
 from .model_registry import InMemoryModelRegistryStore, JsonFileModelRegistryStore, ModelRegistry
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
@@ -501,6 +506,43 @@ class DataResidencyValidationResponse(APIPayloadModel):
     default_region: str | None = None
 
 
+class GovernancePolicyUpsertRequest(APIPayloadModel):
+    consent_required: bool = False
+    allowed_target_patterns: list[str] = Field(default_factory=list)
+
+
+class GovernancePolicyResponse(APIPayloadModel):
+    tenant_id: str
+    consent_required: bool
+    allowed_target_patterns: list[str] = Field(default_factory=list)
+    created_at: float
+    updated_at: float
+
+
+class GovernancePolicyListResponse(APIPayloadModel):
+    items: list[GovernancePolicyResponse]
+    total: int
+
+
+class GovernanceEvaluateRequest(APIPayloadModel):
+    tenant_id: str | None = None
+    action_type: str
+    target: str | None = None
+    consent_granted: bool = False
+
+
+class GovernanceEvaluationResponse(APIPayloadModel):
+    tenant_id: str
+    action_type: str
+    target: str | None = None
+    consent_granted: bool
+    allowed: bool
+    reason: str
+    matched_pattern: str | None = None
+    allowed_target_patterns: list[str] = Field(default_factory=list)
+    evaluated_at: float
+
+
 class DriftSampleRequest(APIPayloadModel):
     stream_id: str
     metric_name: str
@@ -683,6 +725,14 @@ def create_app() -> FastAPI:
         "on",
     }
     data_residency_default_region = os.getenv("DATA_RESIDENCY_DEFAULT_REGION", "global").strip().lower() or "global"
+    governance_policy_store_type = os.getenv("GOVERNANCE_POLICY_STORE", "memory").strip().lower()
+    governance_policy_file_path = os.getenv("GOVERNANCE_POLICY_FILE_PATH", "")
+    governance_enforcement_enabled = os.getenv("GOVERNANCE_ENFORCEMENT_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     drift_baseline_window = int(os.getenv("DRIFT_BASELINE_WINDOW", "20"))
     drift_recent_window = int(os.getenv("DRIFT_RECENT_WINDOW", "10"))
     drift_default_threshold = float(os.getenv("DRIFT_DEFAULT_THRESHOLD", "0.25"))
@@ -836,6 +886,13 @@ def create_app() -> FastAPI:
     else:
         data_residency_store = InMemoryDataResidencyStore()
 
+    if governance_policy_store_type == "file":
+        if not governance_policy_file_path:
+            raise RuntimeError("GOVERNANCE_POLICY_FILE_PATH is required when GOVERNANCE_POLICY_STORE=file")
+        governance_policy_store = JsonFileGovernancePolicyStore(governance_policy_file_path)
+    else:
+        governance_policy_store = InMemoryGovernancePolicyStore()
+
     if policy_decision_store_type == "file":
         if not policy_decision_file_path:
             raise RuntimeError("POLICY_DECISION_FILE_PATH is required when POLICY_DECISION_STORE=file")
@@ -867,6 +924,7 @@ def create_app() -> FastAPI:
     usage_metering = TenantUsageMetering(store=usage_metering_store)
     billing = BillingPrimitives(store=billing_store)
     data_residency = TenantDataResidencyPolicyService(store=data_residency_store)
+    governance_controls = ConsentTargetGovernanceService(store=governance_policy_store)
     drift_monitor = DriftMonitor(
         baseline_window=drift_baseline_window,
         recent_window=drift_recent_window,
@@ -911,6 +969,10 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/data-residency/validate") or path.startswith("/data-residency/validate"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/data-residency") or path.startswith("/data-residency"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/governance") or path.startswith("/governance"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/events/subscriptions") or path.startswith("/events/subscriptions"):
             return "admin"
@@ -1523,6 +1585,118 @@ def create_app() -> FastAPI:
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Correlation-ID"] = request_id
         return response
+
+    def _to_governance_policy_response(payload: dict[str, Any]) -> GovernancePolicyResponse:
+        return GovernancePolicyResponse(
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            consent_required=bool(payload.get("consent_required", False)),
+            allowed_target_patterns=[
+                str(item) for item in payload.get("allowed_target_patterns", []) if isinstance(item, str)
+            ],
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _upsert_governance_policy(
+        tenant_id: str,
+        payload: GovernancePolicyUpsertRequest,
+    ) -> GovernancePolicyResponse:
+        try:
+            policy = governance_controls.upsert_policy(
+                tenant_id=tenant_id,
+                consent_required=payload.consent_required,
+                allowed_target_patterns=payload.allowed_target_patterns,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_governance_policy_response(policy)
+
+    def _get_governance_policy(tenant_id: str) -> GovernancePolicyResponse:
+        try:
+            policy = governance_controls.get_policy(tenant_id=tenant_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="governance policy not found") from exc
+        return _to_governance_policy_response(policy)
+
+    def _list_governance_policies() -> GovernancePolicyListResponse:
+        items = [_to_governance_policy_response(item) for item in governance_controls.list_policies()]
+        return GovernancePolicyListResponse(items=items, total=len(items))
+
+    def _coerce_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    def _consent_granted(request: Request, action: UIAction | None = None) -> bool:
+        from_header = _coerce_bool(request.headers.get("x-consent-granted", ""))
+        if action is None:
+            return from_header
+        from_action = _coerce_bool(action.metadata.get("consent_granted"))
+        return from_header or from_action
+
+    def _evaluate_governance(
+        *,
+        tenant_id: str,
+        action_type: str,
+        target: str | None,
+        consent_granted: bool,
+    ) -> GovernanceEvaluationResponse:
+        try:
+            payload = governance_controls.evaluate(
+                tenant_id=tenant_id,
+                action_type=action_type,
+                target=target,
+                consent_granted=consent_granted,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return GovernanceEvaluationResponse(
+            tenant_id=str(payload.get("tenant_id", tenant_id)),
+            action_type=str(payload.get("action_type", action_type)),
+            target=(None if payload.get("target") in {None, ""} else str(payload.get("target"))),
+            consent_granted=bool(payload.get("consent_granted", False)),
+            allowed=bool(payload.get("allowed", True)),
+            reason=str(payload.get("reason", "unknown")),
+            matched_pattern=(
+                None
+                if payload.get("matched_pattern") in {None, ""}
+                else str(payload.get("matched_pattern"))
+            ),
+            allowed_target_patterns=[
+                str(item) for item in payload.get("allowed_target_patterns", []) if isinstance(item, str)
+            ],
+            evaluated_at=float(payload.get("evaluated_at", time.time())),
+        )
+
+    def _enforce_governance_or_raise(request: Request, tenant_id: str, action: UIAction) -> None:
+        if not governance_enforcement_enabled:
+            return
+
+        evaluation = _evaluate_governance(
+            tenant_id=tenant_id,
+            action_type=action.action_type.value,
+            target=action.target,
+            consent_granted=_consent_granted(request, action),
+        )
+        if evaluation.allowed:
+            return
+
+        _append_audit_event(
+            request,
+            action="governance.enforcement.denied",
+            resource_type="governance_policy",
+            resource_id=tenant_id,
+            details={
+                "reason": evaluation.reason,
+                "action_type": evaluation.action_type,
+                "target": evaluation.target,
+            },
+        )
+        raise HTTPException(status_code=403, detail=f"governance policy denied action: {evaluation.reason}")
 
     def _to_drift_status_response(payload: dict[str, Any]) -> DriftStatusResponse:
         return DriftStatusResponse(
@@ -2580,6 +2754,7 @@ def create_app() -> FastAPI:
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/step", response_model=StepResponse)
     def step_session_v1(session_id: str, action: UIAction, request: Request) -> StepResponse:
+        _enforce_governance_or_raise(request, _tenant_id(request), action)
         response = _step_session(session_id, action, tenant_id=_tenant_id(request))
         _record_usage_metering(tenant_id=_tenant_id(request), dimension="session_step", units=1.0)
         _append_audit_event(
@@ -2613,6 +2788,7 @@ def create_app() -> FastAPI:
         request: Request,
     ) -> StepResponse:
         _set_deprecation_headers(response)
+        _enforce_governance_or_raise(request, _tenant_id(request), action)
         step_response = _step_session(session_id, action, tenant_id=_tenant_id(request))
         _record_usage_metering(tenant_id=_tenant_id(request), dimension="session_step", units=1.0)
         _append_audit_event(
@@ -3480,6 +3656,103 @@ def create_app() -> FastAPI:
     def get_data_residency_policy_legacy(tenant_id: str, response: Response) -> DataResidencyPolicyResponse:
         _set_deprecation_headers(response)
         return _get_data_residency_policy(tenant_id)
+
+    @app.post(f"{API_V1_PREFIX}/governance/policies/{{tenant_id}}", response_model=GovernancePolicyResponse)
+    def upsert_governance_policy_v1(
+        tenant_id: str,
+        payload: GovernancePolicyUpsertRequest,
+        request: Request,
+    ) -> GovernancePolicyResponse:
+        policy = _upsert_governance_policy(tenant_id, payload)
+        _append_audit_event(
+            request,
+            action="governance.policy.upsert",
+            resource_type="governance_policy",
+            resource_id=tenant_id,
+            details={
+                "consent_required": policy.consent_required,
+                "allowed_target_patterns": policy.allowed_target_patterns,
+            },
+        )
+        return policy
+
+    @app.post("/governance/policies/{tenant_id}", response_model=GovernancePolicyResponse, deprecated=True)
+    def upsert_governance_policy_legacy(
+        tenant_id: str,
+        payload: GovernancePolicyUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> GovernancePolicyResponse:
+        _set_deprecation_headers(response)
+        policy = _upsert_governance_policy(tenant_id, payload)
+        _append_audit_event(
+            request,
+            action="governance.policy.upsert",
+            resource_type="governance_policy",
+            resource_id=tenant_id,
+            details={
+                "consent_required": policy.consent_required,
+                "allowed_target_patterns": policy.allowed_target_patterns,
+            },
+        )
+        return policy
+
+    @app.get(f"{API_V1_PREFIX}/governance/policies", response_model=GovernancePolicyListResponse)
+    def list_governance_policies_v1() -> GovernancePolicyListResponse:
+        return _list_governance_policies()
+
+    @app.get("/governance/policies", response_model=GovernancePolicyListResponse, deprecated=True)
+    def list_governance_policies_legacy(response: Response) -> GovernancePolicyListResponse:
+        _set_deprecation_headers(response)
+        return _list_governance_policies()
+
+    @app.get(f"{API_V1_PREFIX}/governance/policies/{{tenant_id}}", response_model=GovernancePolicyResponse)
+    def get_governance_policy_v1(tenant_id: str) -> GovernancePolicyResponse:
+        return _get_governance_policy(tenant_id)
+
+    @app.get("/governance/policies/{tenant_id}", response_model=GovernancePolicyResponse, deprecated=True)
+    def get_governance_policy_legacy(tenant_id: str, response: Response) -> GovernancePolicyResponse:
+        _set_deprecation_headers(response)
+        return _get_governance_policy(tenant_id)
+
+    @app.post(f"{API_V1_PREFIX}/governance/evaluate", response_model=GovernanceEvaluationResponse)
+    def evaluate_governance_v1(payload: GovernanceEvaluateRequest, request: Request) -> GovernanceEvaluationResponse:
+        caller_tenant = _tenant_id(request)
+        if payload.tenant_id is not None and payload.tenant_id.strip() and payload.tenant_id.strip() != caller_tenant:
+            raise HTTPException(status_code=403, detail="tenant override does not match caller scope")
+        target_tenant = payload.tenant_id.strip() if payload.tenant_id is not None else caller_tenant
+        if not target_tenant:
+            target_tenant = caller_tenant
+        evaluation = _evaluate_governance(
+            tenant_id=target_tenant,
+            action_type=payload.action_type,
+            target=payload.target,
+            consent_granted=payload.consent_granted,
+        )
+        _record_usage_metering(tenant_id=target_tenant, dimension="governance_evaluate", units=1.0)
+        return evaluation
+
+    @app.post("/governance/evaluate", response_model=GovernanceEvaluationResponse, deprecated=True)
+    def evaluate_governance_legacy(
+        payload: GovernanceEvaluateRequest,
+        response: Response,
+        request: Request,
+    ) -> GovernanceEvaluationResponse:
+        _set_deprecation_headers(response)
+        caller_tenant = _tenant_id(request)
+        if payload.tenant_id is not None and payload.tenant_id.strip() and payload.tenant_id.strip() != caller_tenant:
+            raise HTTPException(status_code=403, detail="tenant override does not match caller scope")
+        target_tenant = payload.tenant_id.strip() if payload.tenant_id is not None else caller_tenant
+        if not target_tenant:
+            target_tenant = caller_tenant
+        evaluation = _evaluate_governance(
+            tenant_id=target_tenant,
+            action_type=payload.action_type,
+            target=payload.target,
+            consent_granted=payload.consent_granted,
+        )
+        _record_usage_metering(tenant_id=target_tenant, dimension="governance_evaluate", units=1.0)
+        return evaluation
 
     @app.post(f"{API_V1_PREFIX}/drift/samples", response_model=DriftStatusResponse)
     def ingest_drift_sample_v1(payload: DriftSampleRequest, request: Request) -> DriftStatusResponse:
