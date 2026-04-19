@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from enum import Enum
 import os
 from threading import Event, Thread
 import time
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import ConfigDict, Field
 
 from .error_mapping import map_exception_to_error
@@ -297,6 +299,8 @@ def create_app() -> FastAPI:
     audit_events: list[dict[str, Any]] = []
     metadata_store_type = os.getenv("SESSION_METADATA_STORE", "memory").strip().lower()
     metadata_store_file_path = os.getenv("SESSION_METADATA_FILE_PATH", "")
+    operator_artifacts_file_path = os.getenv("OPERATOR_CONSOLE_ARTIFACTS_FILE_PATH", "")
+    operator_queue_file_path = os.getenv("OPERATOR_CONSOLE_QUEUE_FILE_PATH", "")
 
     app.add_middleware(
         CORSMiddleware,
@@ -414,6 +418,8 @@ def create_app() -> FastAPI:
         return path.startswith("/docs") or path == "/redoc"
 
     def _required_role_for_request(method: str, path: str) -> str:
+        if path.startswith(f"{API_V1_PREFIX}/operator") or path.startswith("/operator"):
+            return "admin"
         if path.startswith(f"{API_V1_PREFIX}/auth/keys") or path.startswith("/auth/keys"):
             return "admin"
         if (
@@ -451,6 +457,106 @@ def create_app() -> FastAPI:
                 "details": details or {},
             }
         )
+
+    def _load_optional_json_file(file_path: str) -> Any:
+        path_text = file_path.strip()
+        if not path_text:
+            return None
+
+        path = Path(path_text)
+        if not path.exists():
+            return None
+
+        content = path.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        return json.loads(content)
+
+    def _summarize_queue_state(payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            return {"available": False, "message": "queue snapshot unavailable"}
+
+        jobs = payload.get("jobs", {}) if isinstance(payload.get("jobs", {}), dict) else {}
+        ready = payload.get("ready", []) if isinstance(payload.get("ready", []), list) else []
+        dead_letter = payload.get("dead_letter", []) if isinstance(payload.get("dead_letter", []), list) else []
+        leases = payload.get("leases", {}) if isinstance(payload.get("leases", {}), dict) else {}
+        return {
+            "available": True,
+            "job_count": len(jobs),
+            "ready_count": len(ready),
+            "dead_letter_count": len(dead_letter),
+            "lease_count": len(leases),
+        }
+
+    def _build_operator_console_payload() -> dict[str, Any]:
+        artifact_payload = _load_optional_json_file(operator_artifacts_file_path)
+        queue_payload = _load_optional_json_file(operator_queue_file_path)
+        sessions = registry.list_sessions(page=1, page_size=50, tenant_id=None)
+        traces = {
+            "api": api_tracer.trace_snapshot(),
+            "orchestrator": orchestrator_tracer.trace_snapshot(),
+        }
+        return {
+            "sessions": sessions,
+            "traces": traces,
+            "artifacts": artifact_payload if artifact_payload is not None else {"available": False},
+            "queue": _summarize_queue_state(queue_payload),
+        }
+
+    def _render_operator_console(payload: dict[str, Any]) -> str:
+        sessions = payload["sessions"]
+        traces = payload["traces"]
+        artifacts = payload["artifacts"]
+        queue = payload["queue"]
+
+        session_rows = "".join(
+            f"<tr><td>{item['session_id']}</td><td>{item['goal']}</td><td>{item['status']}</td><td>{item['tenant_id']}</td></tr>"
+            for item in sessions.get("items", [])
+        ) or "<tr><td colspan='4'>No sessions</td></tr>"
+
+        traces_json = json.dumps(traces, indent=2)
+        artifacts_json = json.dumps(artifacts, indent=2)
+        queue_json = json.dumps(queue, indent=2)
+
+        return f"""<!doctype html>
+<html lang='en'>
+<head>
+    <meta charset='utf-8' />
+    <title>Project Mimic Operator Console</title>
+    <style>
+        body {{ font-family: system-ui, sans-serif; margin: 24px; background: #0b1020; color: #e8edf7; }}
+        h1, h2 {{ color: #f5f7ff; }}
+        section {{ background: #121a31; border: 1px solid #24314f; border-radius: 12px; padding: 16px; margin-bottom: 16px; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ text-align: left; border-bottom: 1px solid #24314f; padding: 8px; vertical-align: top; }}
+        pre {{ overflow: auto; background: #09101f; padding: 12px; border-radius: 8px; }}
+        .muted {{ color: #a9b4cc; }}
+    </style>
+</head>
+<body>
+    <h1>Project Mimic Operator Console</h1>
+    <p class='muted'>Sessions, traces, artifacts, and queue state snapshot</p>
+    <section>
+        <h2>Sessions</h2>
+        <table>
+            <thead><tr><th>Session</th><th>Goal</th><th>Status</th><th>Tenant</th></tr></thead>
+            <tbody>{session_rows}</tbody>
+        </table>
+    </section>
+    <section>
+        <h2>Traces</h2>
+        <pre>{traces_json}</pre>
+    </section>
+    <section>
+        <h2>Artifacts</h2>
+        <pre>{artifacts_json}</pre>
+    </section>
+    <section>
+        <h2>Queue State</h2>
+        <pre>{queue_json}</pre>
+    </section>
+</body>
+</html>"""
 
     def _list_audit_events(
         *,
@@ -1400,6 +1506,26 @@ def create_app() -> FastAPI:
             "orchestrator": orchestrator_tracer.trace_snapshot(),
         }
         return snapshot
+
+    @app.get(f"{API_V1_PREFIX}/operator")
+    def get_operator_console_v1() -> HTMLResponse:
+        payload = _build_operator_console_payload()
+        return HTMLResponse(content=_render_operator_console(payload))
+
+    @app.get("/operator", deprecated=True)
+    def get_operator_console_legacy(response: Response) -> HTMLResponse:
+        _set_deprecation_headers(response)
+        payload = _build_operator_console_payload()
+        return HTMLResponse(content=_render_operator_console(payload))
+
+    @app.get(f"{API_V1_PREFIX}/operator/snapshot")
+    def get_operator_snapshot_v1() -> dict[str, Any]:
+        return _build_operator_console_payload()
+
+    @app.get("/operator/snapshot", deprecated=True)
+    def get_operator_snapshot_legacy(response: Response) -> dict[str, Any]:
+        _set_deprecation_headers(response)
+        return _build_operator_console_payload()
 
     return app
 

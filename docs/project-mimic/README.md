@@ -46,6 +46,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/30-slo-burn-rate-alerts-wired-to-on-call-paging.md`
   - `lld/31-runbook-automation-for-common-incident-classes.md`
   - `lld/32-compliance-safe-data-deletion-workflows.md`
+  - `lld/33-operator-web-console-for-sessions-traces-artifacts-and-queue-state.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
