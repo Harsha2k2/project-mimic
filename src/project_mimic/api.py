@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 from enum import Enum
 import os
@@ -26,6 +27,7 @@ from .event_stream import EventStreamBroker
 from .model_registry import InMemoryModelRegistryStore, JsonFileModelRegistryStore, ModelRegistry
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
+from .policy_explorer import InMemoryPolicyDecisionStore, JsonFilePolicyDecisionStore, PolicyDecisionExplorer
 from .queue_runtime import ActionJob, InMemoryActionQueue, JsonFileQueueStore
 from .review_queue import HumanReviewQueue, InMemoryReviewQueueStore, JsonFileReviewQueueStore
 from .security import redact_sensitive_structure, redact_sensitive_text
@@ -392,6 +394,56 @@ class ReviewQueueListResponse(APIPayloadModel):
     total: int
 
 
+class PolicyDecisionEvaluateRequest(APIPayloadModel):
+    actor_id: str
+    site_id: str
+    region_allowed: bool
+    has_authorization: bool
+    risk_score: float = Field(ge=0.0, le=1.0)
+    action: str
+    jurisdiction: str = "global"
+    metadata: dict[str, str] = Field(default_factory=dict)
+    simulate: bool = False
+
+
+class PolicyExplanationResponse(APIPayloadModel):
+    rule_id: str
+    priority: int
+    verdict: str
+    reason: str
+
+
+class PolicyDecisionResponse(APIPayloadModel):
+    decision_id: str
+    tenant_id: str
+    actor_id: str
+    site_id: str
+    region_allowed: bool
+    has_authorization: bool
+    risk_score: float
+    action: str
+    jurisdiction: str
+    metadata: dict[str, str] = Field(default_factory=dict)
+    simulate: bool
+    allowed: bool
+    would_allow: bool | None = None
+    reason: str
+    applied_rule_id: str | None = None
+    created_at: float
+    explanations: list[PolicyExplanationResponse] = Field(default_factory=list)
+
+
+class PolicyDecisionListResponse(APIPayloadModel):
+    items: list[PolicyDecisionResponse]
+    total: int
+
+
+class PolicyDecisionSnapshotResponse(APIPayloadModel):
+    items: list[PolicyDecisionResponse]
+    total: int
+    selected: PolicyDecisionResponse | None = None
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -450,6 +502,9 @@ def create_app() -> FastAPI:
     drift_baseline_window = int(os.getenv("DRIFT_BASELINE_WINDOW", "20"))
     drift_recent_window = int(os.getenv("DRIFT_RECENT_WINDOW", "10"))
     drift_default_threshold = float(os.getenv("DRIFT_DEFAULT_THRESHOLD", "0.25"))
+    policy_risk_threshold = float(os.getenv("POLICY_ENGINE_RISK_THRESHOLD", "0.7"))
+    policy_decision_store_type = os.getenv("POLICY_DECISION_STORE", "memory").strip().lower()
+    policy_decision_file_path = os.getenv("POLICY_DECISION_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -569,6 +624,13 @@ def create_app() -> FastAPI:
     else:
         model_registry_store = InMemoryModelRegistryStore()
 
+    if policy_decision_store_type == "file":
+        if not policy_decision_file_path:
+            raise RuntimeError("POLICY_DECISION_FILE_PATH is required when POLICY_DECISION_STORE=file")
+        policy_decision_store = JsonFilePolicyDecisionStore(policy_decision_file_path)
+    else:
+        policy_decision_store = InMemoryPolicyDecisionStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -593,6 +655,10 @@ def create_app() -> FastAPI:
         baseline_window=drift_baseline_window,
         recent_window=drift_recent_window,
         default_threshold=drift_default_threshold,
+    )
+    policy_explorer = PolicyDecisionExplorer(
+        risk_threshold=policy_risk_threshold,
+        store=policy_decision_store,
     )
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
@@ -927,6 +993,191 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _to_review_queue_item_response(item)
+
+    def _to_policy_explanation_response(payload: dict[str, Any]) -> PolicyExplanationResponse:
+        return PolicyExplanationResponse(
+            rule_id=str(payload.get("rule_id", "")),
+            priority=int(payload.get("priority", 0)),
+            verdict=str(payload.get("verdict", "")),
+            reason=str(payload.get("reason", "")),
+        )
+
+    def _to_policy_decision_response(payload: dict[str, Any]) -> PolicyDecisionResponse:
+        return PolicyDecisionResponse(
+            decision_id=str(payload.get("decision_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            actor_id=str(payload.get("actor_id", "")),
+            site_id=str(payload.get("site_id", "")),
+            region_allowed=bool(payload.get("region_allowed", False)),
+            has_authorization=bool(payload.get("has_authorization", False)),
+            risk_score=float(payload.get("risk_score", 0.0)),
+            action=str(payload.get("action", "")),
+            jurisdiction=str(payload.get("jurisdiction", "global")),
+            metadata={
+                str(key): str(value)
+                for key, value in dict(payload.get("metadata", {})).items()
+            },
+            simulate=bool(payload.get("simulate", False)),
+            allowed=bool(payload.get("allowed", False)),
+            would_allow=(
+                None
+                if payload.get("would_allow") is None
+                else bool(payload.get("would_allow"))
+            ),
+            reason=str(payload.get("reason", "")),
+            applied_rule_id=(
+                None
+                if payload.get("applied_rule_id") is None
+                else str(payload.get("applied_rule_id"))
+            ),
+            created_at=float(payload.get("created_at", 0.0)),
+            explanations=[
+                _to_policy_explanation_response(item)
+                for item in payload.get("explanations", [])
+                if isinstance(item, dict)
+            ],
+        )
+
+    def _evaluate_policy_decision(
+        payload: PolicyDecisionEvaluateRequest,
+        *,
+        tenant_id: str,
+    ) -> PolicyDecisionResponse:
+        try:
+            decision = policy_explorer.evaluate(
+                tenant_id=tenant_id,
+                actor_id=payload.actor_id,
+                site_id=payload.site_id,
+                region_allowed=payload.region_allowed,
+                has_authorization=payload.has_authorization,
+                risk_score=payload.risk_score,
+                action=payload.action,
+                jurisdiction=payload.jurisdiction,
+                metadata=payload.metadata,
+                simulate=payload.simulate,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_policy_decision_response(decision)
+
+    def _list_policy_decisions(
+        *,
+        tenant_id: str,
+        allowed: bool | None,
+        limit: int,
+    ) -> PolicyDecisionListResponse:
+        items = policy_explorer.list(tenant_id=tenant_id, allowed=allowed, limit=limit)
+        response_items = [_to_policy_decision_response(item) for item in items]
+        return PolicyDecisionListResponse(items=response_items, total=len(response_items))
+
+    def _get_policy_decision(*, decision_id: str, tenant_id: str) -> PolicyDecisionResponse:
+        try:
+            payload = policy_explorer.get(decision_id=decision_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="policy decision not found") from exc
+
+        if str(payload.get("tenant_id", default_tenant)) != tenant_id:
+            raise HTTPException(status_code=404, detail="policy decision not found")
+        return _to_policy_decision_response(payload)
+
+    def _build_policy_snapshot(
+        *,
+        tenant_id: str,
+        allowed: bool | None,
+        limit: int,
+        decision_id: str | None,
+    ) -> PolicyDecisionSnapshotResponse:
+        listing = _list_policy_decisions(tenant_id=tenant_id, allowed=allowed, limit=limit)
+        selected: PolicyDecisionResponse | None = None
+        if decision_id:
+            try:
+                selected = _get_policy_decision(decision_id=decision_id, tenant_id=tenant_id)
+            except HTTPException:
+                selected = None
+
+        if selected is None and listing.items:
+            selected = listing.items[0]
+
+        return PolicyDecisionSnapshotResponse(items=listing.items, total=listing.total, selected=selected)
+
+    def _render_policy_explorer(snapshot: PolicyDecisionSnapshotResponse) -> str:
+        selected_id = ""
+        if snapshot.selected is not None:
+            selected_id = snapshot.selected.decision_id
+
+        table_rows = "".join(
+            (
+                f"<tr{' class=\'selected\'' if item.decision_id == selected_id else ''}>"
+                f"<td><a href='?decision_id={html.escape(item.decision_id)}'>{html.escape(item.decision_id)}</a></td>"
+                f"<td>{'allow' if item.allowed else 'deny'}</td>"
+                f"<td>{html.escape(item.actor_id)}</td>"
+                f"<td>{html.escape(item.site_id)}</td>"
+                f"<td>{html.escape(item.reason)}</td>"
+                "</tr>"
+            )
+            for item in snapshot.items
+        ) or "<tr><td colspan='5'>No decisions</td></tr>"
+
+        explanation_rows = ""
+        selected_payload = "{}"
+        if snapshot.selected is not None:
+            explanation_rows = "".join(
+                (
+                    "<tr>"
+                    f"<td>{html.escape(item.rule_id)}</td>"
+                    f"<td>{item.priority}</td>"
+                    f"<td>{html.escape(item.verdict)}</td>"
+                    f"<td>{html.escape(item.reason)}</td>"
+                    "</tr>"
+                )
+                for item in snapshot.selected.explanations
+            ) or "<tr><td colspan='4'>No explanations</td></tr>"
+            selected_payload = html.escape(
+                json.dumps(snapshot.selected.model_dump(mode="json"), indent=2, sort_keys=True)
+            )
+        else:
+            explanation_rows = "<tr><td colspan='4'>No decision selected</td></tr>"
+
+        return f"""<!doctype html>
+<html lang='en'>
+<head>
+    <meta charset='utf-8' />
+    <title>Project Mimic Policy Explorer</title>
+    <style>
+        body {{ font-family: system-ui, sans-serif; margin: 24px; background: #0b1020; color: #e8edf7; }}
+        h1, h2 {{ color: #f5f7ff; }}
+        section {{ background: #121a31; border: 1px solid #24314f; border-radius: 12px; padding: 16px; margin-bottom: 16px; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th, td {{ text-align: left; border-bottom: 1px solid #24314f; padding: 8px; vertical-align: top; }}
+        tr.selected {{ background: #1a2742; }}
+        a {{ color: #7dc7ff; text-decoration: none; }}
+        pre {{ overflow: auto; background: #09101f; padding: 12px; border-radius: 8px; }}
+        .muted {{ color: #a9b4cc; }}
+    </style>
+</head>
+<body>
+    <h1>Policy Decision Explorer</h1>
+    <p class='muted'>Review policy outcomes with rule-by-rule explanation trails</p>
+    <section>
+        <h2>Recent Decisions ({snapshot.total})</h2>
+        <table>
+            <thead><tr><th>Decision ID</th><th>Outcome</th><th>Actor</th><th>Site</th><th>Reason</th></tr></thead>
+            <tbody>{table_rows}</tbody>
+        </table>
+    </section>
+    <section>
+        <h2>Explanation Trail</h2>
+        <table>
+            <thead><tr><th>Rule</th><th>Priority</th><th>Verdict</th><th>Reason</th></tr></thead>
+            <tbody>{explanation_rows}</tbody>
+        </table>
+    </section>
+    <section>
+        <h2>Selected Decision JSON</h2>
+        <pre>{selected_payload}</pre>
+    </section>
+</body>
+</html>"""
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -2333,6 +2584,164 @@ def create_app() -> FastAPI:
             },
         )
         return item
+
+    @app.post(f"{API_V1_PREFIX}/policy/decisions/evaluate", response_model=PolicyDecisionResponse)
+    def evaluate_policy_decision_v1(
+        payload: PolicyDecisionEvaluateRequest,
+        request: Request,
+    ) -> PolicyDecisionResponse:
+        decision = _evaluate_policy_decision(payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="policy.decision.evaluate",
+            resource_type="policy_decision",
+            resource_id=decision.decision_id,
+            details={
+                "allowed": decision.allowed,
+                "simulate": decision.simulate,
+                "applied_rule_id": decision.applied_rule_id,
+            },
+        )
+        _publish_realtime_event(
+            event_type="policy.decision.made",
+            tenant_id=_tenant_id(request),
+            payload={
+                "decision_id": decision.decision_id,
+                "allowed": decision.allowed,
+                "reason": decision.reason,
+                "applied_rule_id": decision.applied_rule_id,
+            },
+        )
+        return decision
+
+    @app.post("/policy/decisions/evaluate", response_model=PolicyDecisionResponse, deprecated=True)
+    def evaluate_policy_decision_legacy(
+        payload: PolicyDecisionEvaluateRequest,
+        response: Response,
+        request: Request,
+    ) -> PolicyDecisionResponse:
+        _set_deprecation_headers(response)
+        decision = _evaluate_policy_decision(payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="policy.decision.evaluate",
+            resource_type="policy_decision",
+            resource_id=decision.decision_id,
+            details={
+                "allowed": decision.allowed,
+                "simulate": decision.simulate,
+                "applied_rule_id": decision.applied_rule_id,
+            },
+        )
+        _publish_realtime_event(
+            event_type="policy.decision.made",
+            tenant_id=_tenant_id(request),
+            payload={
+                "decision_id": decision.decision_id,
+                "allowed": decision.allowed,
+                "reason": decision.reason,
+                "applied_rule_id": decision.applied_rule_id,
+            },
+        )
+        return decision
+
+    @app.get(f"{API_V1_PREFIX}/policy/decisions", response_model=PolicyDecisionListResponse)
+    def list_policy_decisions_v1(
+        request: Request,
+        allowed: bool | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> PolicyDecisionListResponse:
+        return _list_policy_decisions(tenant_id=_tenant_id(request), allowed=allowed, limit=limit)
+
+    @app.get("/policy/decisions", response_model=PolicyDecisionListResponse, deprecated=True)
+    def list_policy_decisions_legacy(
+        response: Response,
+        request: Request,
+        allowed: bool | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> PolicyDecisionListResponse:
+        _set_deprecation_headers(response)
+        return _list_policy_decisions(tenant_id=_tenant_id(request), allowed=allowed, limit=limit)
+
+    @app.get(f"{API_V1_PREFIX}/policy/decisions/{{decision_id}}", response_model=PolicyDecisionResponse)
+    def get_policy_decision_v1(
+        decision_id: str,
+        request: Request,
+    ) -> PolicyDecisionResponse:
+        return _get_policy_decision(decision_id=decision_id, tenant_id=_tenant_id(request))
+
+    @app.get("/policy/decisions/{decision_id}", response_model=PolicyDecisionResponse, deprecated=True)
+    def get_policy_decision_legacy(
+        decision_id: str,
+        response: Response,
+        request: Request,
+    ) -> PolicyDecisionResponse:
+        _set_deprecation_headers(response)
+        return _get_policy_decision(decision_id=decision_id, tenant_id=_tenant_id(request))
+
+    @app.get(f"{API_V1_PREFIX}/operator/policy", response_class=HTMLResponse)
+    def operator_policy_explorer_v1(
+        request: Request,
+        allowed: bool | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=200),
+        decision_id: str | None = Query(default=None),
+    ) -> HTMLResponse:
+        snapshot = _build_policy_snapshot(
+            tenant_id=_tenant_id(request),
+            allowed=allowed,
+            limit=limit,
+            decision_id=decision_id,
+        )
+        return HTMLResponse(content=_render_policy_explorer(snapshot))
+
+    @app.get("/operator/policy", response_class=HTMLResponse, deprecated=True)
+    def operator_policy_explorer_legacy(
+        request: Request,
+        response: Response,
+        allowed: bool | None = Query(default=None),
+        limit: int = Query(default=50, ge=1, le=200),
+        decision_id: str | None = Query(default=None),
+    ) -> HTMLResponse:
+        _set_deprecation_headers(response)
+        snapshot = _build_policy_snapshot(
+            tenant_id=_tenant_id(request),
+            allowed=allowed,
+            limit=limit,
+            decision_id=decision_id,
+        )
+        html_response = HTMLResponse(content=_render_policy_explorer(snapshot))
+        _set_deprecation_headers(html_response)
+        return html_response
+
+    @app.get(f"{API_V1_PREFIX}/operator/policy/snapshot", response_model=PolicyDecisionSnapshotResponse)
+    def operator_policy_snapshot_v1(
+        request: Request,
+        allowed: bool | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+        decision_id: str | None = Query(default=None),
+    ) -> PolicyDecisionSnapshotResponse:
+        return _build_policy_snapshot(
+            tenant_id=_tenant_id(request),
+            allowed=allowed,
+            limit=limit,
+            decision_id=decision_id,
+        )
+
+    @app.get("/operator/policy/snapshot", response_model=PolicyDecisionSnapshotResponse, deprecated=True)
+    def operator_policy_snapshot_legacy(
+        request: Request,
+        response: Response,
+        allowed: bool | None = Query(default=None),
+        limit: int = Query(default=100, ge=1, le=500),
+        decision_id: str | None = Query(default=None),
+    ) -> PolicyDecisionSnapshotResponse:
+        _set_deprecation_headers(response)
+        return _build_policy_snapshot(
+            tenant_id=_tenant_id(request),
+            allowed=allowed,
+            limit=limit,
+            decision_id=decision_id,
+        )
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:

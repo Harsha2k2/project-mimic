@@ -47,7 +47,7 @@ Execution rule for this backlog:
 32. [x] Add model registry with rollout channels (dev, canary, prod).
 33. [x] Add online model/grounding drift detection and threshold alerts.
 34. [x] Add human-in-the-loop review queue for low-confidence actions.
-35. [ ] Add policy decision explorer UI with explanation trails.
+35. [x] Add policy decision explorer UI with explanation trails.
 36. [ ] Add feature flag service for safe progressive rollout.
 37. [ ] Add tenant usage metering tied to billable dimensions.
 38. [ ] Add billing primitives (plan limits, overage protection, monthly reports).
