@@ -95,6 +95,11 @@ from .mimetic import (
 )
 from .observability import InMemoryMetrics, OpenTelemetryTracer, TraceSpan
 from .policy import PolicyContext, PolicyDecision, PolicyEngine
+from .policy_verification import (
+    InMemoryPolicyVerificationStore,
+    JsonFilePolicyVerificationStore,
+    PolicyVerificationService,
+)
 from .predictive_autoscaling import (
     InMemoryPredictiveAutoscalingStore,
     JsonFilePredictiveAutoscalingStore,
@@ -220,6 +225,9 @@ __all__ = [
     "PolicyContext",
     "PolicyDecision",
     "PolicyEngine",
+    "InMemoryPolicyVerificationStore",
+    "JsonFilePolicyVerificationStore",
+    "PolicyVerificationService",
     "InMemoryPredictiveAutoscalingStore",
     "JsonFilePredictiveAutoscalingStore",
     "PredictiveAutoscalingService",

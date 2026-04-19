@@ -57,6 +57,11 @@ from .site_pack_registry import InMemorySitePackRegistryStore, JsonFileSitePackR
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
 from .policy_explorer import InMemoryPolicyDecisionStore, JsonFilePolicyDecisionStore, PolicyDecisionExplorer
+from .policy_verification import (
+    InMemoryPolicyVerificationStore,
+    JsonFilePolicyVerificationStore,
+    PolicyVerificationService,
+)
 from .predictive_autoscaling import (
     InMemoryPredictiveAutoscalingStore,
     JsonFilePredictiveAutoscalingStore,
@@ -1056,6 +1061,74 @@ class PolicyDecisionSnapshotResponse(APIPayloadModel):
     selected: PolicyDecisionResponse | None = None
 
 
+class PolicyVerificationRuleUpsertRequest(APIPayloadModel):
+    effect: str
+    priority: int
+    action_patterns: list[str] = Field(default_factory=lambda: ["*"])
+    jurisdictions: list[str] = Field(default_factory=lambda: ["global"])
+    requires_authorization: bool | None = None
+    requires_region_allowed: bool | None = None
+    min_risk_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_risk_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    enabled: bool = True
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class PolicyVerificationRuleResponse(APIPayloadModel):
+    rule_id: str
+    tenant_id: str
+    effect: str
+    priority: int
+    action_patterns: list[str] = Field(default_factory=list)
+    jurisdictions: list[str] = Field(default_factory=list)
+    requires_authorization: bool | None = None
+    requires_region_allowed: bool | None = None
+    min_risk_score: float | None = None
+    max_risk_score: float | None = None
+    enabled: bool
+    metadata: dict[str, str] = Field(default_factory=dict)
+    created_at: float
+    updated_at: float
+
+
+class PolicyVerificationRuleListResponse(APIPayloadModel):
+    items: list[PolicyVerificationRuleResponse]
+    total: int
+
+
+class PolicyVerificationConflictResponse(APIPayloadModel):
+    conflict_id: str
+    conflict_type: str
+    severity: str
+    rule_ids: list[str] = Field(default_factory=list)
+    summary: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    resolution_hint: str
+
+
+class PolicyVerificationValidateRequest(APIPayloadModel):
+    tenant_id: str | None = None
+    include_disabled: bool = False
+
+
+class PolicyVerificationReportResponse(APIPayloadModel):
+    report_id: str
+    tenant_id: str
+    include_disabled: bool
+    total_rules: int
+    active_rules: int
+    checked_pairs: int
+    conflict_count: int
+    severity: str
+    conflicts: list[PolicyVerificationConflictResponse] = Field(default_factory=list)
+    generated_at: float
+
+
+class PolicyVerificationReportListResponse(APIPayloadModel):
+    items: list[PolicyVerificationReportResponse]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1165,6 +1238,8 @@ def create_app() -> FastAPI:
     policy_risk_threshold = float(os.getenv("POLICY_ENGINE_RISK_THRESHOLD", "0.7"))
     policy_decision_store_type = os.getenv("POLICY_DECISION_STORE", "memory").strip().lower()
     policy_decision_file_path = os.getenv("POLICY_DECISION_FILE_PATH", "")
+    policy_verification_store_type = os.getenv("POLICY_VERIFICATION_STORE", "memory").strip().lower()
+    policy_verification_file_path = os.getenv("POLICY_VERIFICATION_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -1382,6 +1457,13 @@ def create_app() -> FastAPI:
     else:
         policy_decision_store = InMemoryPolicyDecisionStore()
 
+    if policy_verification_store_type == "file":
+        if not policy_verification_file_path:
+            raise RuntimeError("POLICY_VERIFICATION_FILE_PATH is required when POLICY_VERIFICATION_STORE=file")
+        policy_verification_store = JsonFilePolicyVerificationStore(policy_verification_file_path)
+    else:
+        policy_verification_store = InMemoryPolicyVerificationStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -1523,6 +1605,7 @@ def create_app() -> FastAPI:
         risk_threshold=policy_risk_threshold,
         store=policy_decision_store,
     )
+    policy_verification = PolicyVerificationService(store=policy_verification_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -1613,6 +1696,12 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/remediation/autonomous/executions") or path.startswith("/remediation/autonomous/executions"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/remediation/autonomous") or path.startswith("/remediation/autonomous"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/policy/verification/validate") or path.startswith("/policy/verification/validate"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/policy/verification/reports") or path.startswith("/policy/verification/reports"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/policy/verification") or path.startswith("/policy/verification"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -3477,6 +3566,174 @@ def create_app() -> FastAPI:
     </section>
 </body>
 </html>"""
+
+    def _to_policy_verification_rule_response(payload: dict[str, Any]) -> PolicyVerificationRuleResponse:
+        min_risk_raw = payload.get("min_risk_score")
+        max_risk_raw = payload.get("max_risk_score")
+        return PolicyVerificationRuleResponse(
+            rule_id=str(payload.get("rule_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            effect=str(payload.get("effect", "")),
+            priority=int(payload.get("priority", 0)),
+            action_patterns=[
+                str(item)
+                for item in payload.get("action_patterns", [])
+                if isinstance(item, str)
+            ],
+            jurisdictions=[
+                str(item)
+                for item in payload.get("jurisdictions", [])
+                if isinstance(item, str)
+            ],
+            requires_authorization=(
+                None
+                if payload.get("requires_authorization") is None
+                else bool(payload.get("requires_authorization"))
+            ),
+            requires_region_allowed=(
+                None
+                if payload.get("requires_region_allowed") is None
+                else bool(payload.get("requires_region_allowed"))
+            ),
+            min_risk_score=(None if min_risk_raw is None else float(min_risk_raw)),
+            max_risk_score=(None if max_risk_raw is None else float(max_risk_raw)),
+            enabled=bool(payload.get("enabled", True)),
+            metadata={
+                str(key): str(value)
+                for key, value in dict(payload.get("metadata", {})).items()
+            },
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_policy_verification_conflict_response(payload: dict[str, Any]) -> PolicyVerificationConflictResponse:
+        return PolicyVerificationConflictResponse(
+            conflict_id=str(payload.get("conflict_id", "")),
+            conflict_type=str(payload.get("conflict_type", "")),
+            severity=str(payload.get("severity", "")),
+            rule_ids=[
+                str(item)
+                for item in payload.get("rule_ids", [])
+                if isinstance(item, str)
+            ],
+            summary=str(payload.get("summary", "")),
+            details=dict(payload.get("details", {})),
+            resolution_hint=str(payload.get("resolution_hint", "")),
+        )
+
+    def _to_policy_verification_report_response(payload: dict[str, Any]) -> PolicyVerificationReportResponse:
+        return PolicyVerificationReportResponse(
+            report_id=str(payload.get("report_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            include_disabled=bool(payload.get("include_disabled", False)),
+            total_rules=int(payload.get("total_rules", 0)),
+            active_rules=int(payload.get("active_rules", 0)),
+            checked_pairs=int(payload.get("checked_pairs", 0)),
+            conflict_count=int(payload.get("conflict_count", 0)),
+            severity=str(payload.get("severity", "none")),
+            conflicts=[
+                _to_policy_verification_conflict_response(item)
+                for item in payload.get("conflicts", [])
+                if isinstance(item, dict)
+            ],
+            generated_at=float(payload.get("generated_at", 0.0)),
+        )
+
+    def _upsert_policy_verification_rule(
+        rule_id: str,
+        payload: PolicyVerificationRuleUpsertRequest,
+        request: Request,
+    ) -> PolicyVerificationRuleResponse:
+        try:
+            rule = policy_verification.upsert_rule(
+                rule_id=rule_id,
+                tenant_id=_tenant_id(request),
+                effect=payload.effect,
+                priority=payload.priority,
+                action_patterns=payload.action_patterns,
+                jurisdictions=payload.jurisdictions,
+                requires_authorization=payload.requires_authorization,
+                requires_region_allowed=payload.requires_region_allowed,
+                min_risk_score=payload.min_risk_score,
+                max_risk_score=payload.max_risk_score,
+                enabled=payload.enabled,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_policy_verification_rule_response(rule)
+
+    def _list_policy_verification_rules(
+        request: Request,
+        include_disabled: bool,
+    ) -> PolicyVerificationRuleListResponse:
+        items = [
+            _to_policy_verification_rule_response(item)
+            for item in policy_verification.list_rules(
+                tenant_id=_tenant_id(request),
+                include_disabled=include_disabled,
+            )
+        ]
+        return PolicyVerificationRuleListResponse(items=items, total=len(items))
+
+    def _get_policy_verification_rule(
+        rule_id: str,
+        request: Request,
+    ) -> PolicyVerificationRuleResponse:
+        try:
+            item = policy_verification.get_rule(
+                rule_id=rule_id,
+                tenant_id=_tenant_id(request),
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"rule not found", "rule does not belong to tenant"}:
+                raise HTTPException(status_code=404, detail="policy verification rule not found") from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+        return _to_policy_verification_rule_response(item)
+
+    def _verify_policy_rules(
+        payload: PolicyVerificationValidateRequest,
+        request: Request,
+    ) -> PolicyVerificationReportResponse:
+        effective_tenant = _resolve_effective_tenant(request, payload.tenant_id)
+        try:
+            report = policy_verification.verify(
+                tenant_id=effective_tenant,
+                include_disabled=payload.include_disabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_policy_verification_report_response(report)
+
+    def _list_policy_verification_reports(
+        request: Request,
+        limit: int,
+    ) -> PolicyVerificationReportListResponse:
+        try:
+            reports = policy_verification.list_reports(
+                tenant_id=_tenant_id(request),
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        items = [_to_policy_verification_report_response(item) for item in reports]
+        return PolicyVerificationReportListResponse(items=items, total=len(items))
+
+    def _get_policy_verification_report(
+        report_id: str,
+        request: Request,
+    ) -> PolicyVerificationReportResponse:
+        try:
+            report = policy_verification.get_report(
+                report_id=report_id,
+                tenant_id=_tenant_id(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if report is None:
+            raise HTTPException(status_code=404, detail="policy verification report not found")
+        return _to_policy_verification_report_response(report)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -6798,6 +7055,214 @@ def create_app() -> FastAPI:
             limit=limit,
             decision_id=decision_id,
         )
+
+    @app.post(
+        f"{API_V1_PREFIX}/policy/verification/rules/{{rule_id}}",
+        response_model=PolicyVerificationRuleResponse,
+    )
+    def upsert_policy_verification_rule_v1(
+        rule_id: str,
+        payload: PolicyVerificationRuleUpsertRequest,
+        request: Request,
+    ) -> PolicyVerificationRuleResponse:
+        rule = _upsert_policy_verification_rule(rule_id, payload, request)
+        _append_audit_event(
+            request,
+            action="policy.verification.rule.upsert",
+            resource_type="policy_verification_rule",
+            resource_id=rule.rule_id,
+            details={
+                "effect": rule.effect,
+                "priority": rule.priority,
+                "enabled": rule.enabled,
+            },
+        )
+        return rule
+
+    @app.post(
+        "/policy/verification/rules/{rule_id}",
+        response_model=PolicyVerificationRuleResponse,
+        deprecated=True,
+    )
+    def upsert_policy_verification_rule_legacy(
+        rule_id: str,
+        payload: PolicyVerificationRuleUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> PolicyVerificationRuleResponse:
+        _set_deprecation_headers(response)
+        rule = _upsert_policy_verification_rule(rule_id, payload, request)
+        _append_audit_event(
+            request,
+            action="policy.verification.rule.upsert",
+            resource_type="policy_verification_rule",
+            resource_id=rule.rule_id,
+            details={
+                "effect": rule.effect,
+                "priority": rule.priority,
+                "enabled": rule.enabled,
+            },
+        )
+        return rule
+
+    @app.get(
+        f"{API_V1_PREFIX}/policy/verification/rules",
+        response_model=PolicyVerificationRuleListResponse,
+    )
+    def list_policy_verification_rules_v1(
+        request: Request,
+        include_disabled: bool = Query(default=True),
+    ) -> PolicyVerificationRuleListResponse:
+        return _list_policy_verification_rules(request, include_disabled)
+
+    @app.get(
+        "/policy/verification/rules",
+        response_model=PolicyVerificationRuleListResponse,
+        deprecated=True,
+    )
+    def list_policy_verification_rules_legacy(
+        response: Response,
+        request: Request,
+        include_disabled: bool = Query(default=True),
+    ) -> PolicyVerificationRuleListResponse:
+        _set_deprecation_headers(response)
+        return _list_policy_verification_rules(request, include_disabled)
+
+    @app.get(
+        f"{API_V1_PREFIX}/policy/verification/rules/{{rule_id}}",
+        response_model=PolicyVerificationRuleResponse,
+    )
+    def get_policy_verification_rule_v1(
+        rule_id: str,
+        request: Request,
+    ) -> PolicyVerificationRuleResponse:
+        return _get_policy_verification_rule(rule_id, request)
+
+    @app.get(
+        "/policy/verification/rules/{rule_id}",
+        response_model=PolicyVerificationRuleResponse,
+        deprecated=True,
+    )
+    def get_policy_verification_rule_legacy(
+        rule_id: str,
+        response: Response,
+        request: Request,
+    ) -> PolicyVerificationRuleResponse:
+        _set_deprecation_headers(response)
+        return _get_policy_verification_rule(rule_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/policy/verification/validate",
+        response_model=PolicyVerificationReportResponse,
+    )
+    def validate_policy_verification_v1(
+        payload: PolicyVerificationValidateRequest,
+        request: Request,
+    ) -> PolicyVerificationReportResponse:
+        report = _verify_policy_rules(payload, request)
+        _record_usage_metering(tenant_id=report.tenant_id, dimension="policy_verification_validate", units=1.0)
+        _append_audit_event(
+            request,
+            action="policy.verification.validate",
+            resource_type="policy_verification_report",
+            resource_id=report.report_id,
+            details={
+                "severity": report.severity,
+                "conflict_count": report.conflict_count,
+            },
+        )
+        if report.conflict_count > 0:
+            _publish_realtime_event(
+                event_type="policy.verification.conflicts_detected",
+                tenant_id=report.tenant_id,
+                payload={
+                    "report_id": report.report_id,
+                    "severity": report.severity,
+                    "conflict_count": report.conflict_count,
+                },
+            )
+        return report
+
+    @app.post(
+        "/policy/verification/validate",
+        response_model=PolicyVerificationReportResponse,
+        deprecated=True,
+    )
+    def validate_policy_verification_legacy(
+        payload: PolicyVerificationValidateRequest,
+        response: Response,
+        request: Request,
+    ) -> PolicyVerificationReportResponse:
+        _set_deprecation_headers(response)
+        report = _verify_policy_rules(payload, request)
+        _record_usage_metering(tenant_id=report.tenant_id, dimension="policy_verification_validate", units=1.0)
+        _append_audit_event(
+            request,
+            action="policy.verification.validate",
+            resource_type="policy_verification_report",
+            resource_id=report.report_id,
+            details={
+                "severity": report.severity,
+                "conflict_count": report.conflict_count,
+            },
+        )
+        if report.conflict_count > 0:
+            _publish_realtime_event(
+                event_type="policy.verification.conflicts_detected",
+                tenant_id=report.tenant_id,
+                payload={
+                    "report_id": report.report_id,
+                    "severity": report.severity,
+                    "conflict_count": report.conflict_count,
+                },
+            )
+        return report
+
+    @app.get(
+        f"{API_V1_PREFIX}/policy/verification/reports",
+        response_model=PolicyVerificationReportListResponse,
+    )
+    def list_policy_verification_reports_v1(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> PolicyVerificationReportListResponse:
+        return _list_policy_verification_reports(request, limit)
+
+    @app.get(
+        "/policy/verification/reports",
+        response_model=PolicyVerificationReportListResponse,
+        deprecated=True,
+    )
+    def list_policy_verification_reports_legacy(
+        response: Response,
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> PolicyVerificationReportListResponse:
+        _set_deprecation_headers(response)
+        return _list_policy_verification_reports(request, limit)
+
+    @app.get(
+        f"{API_V1_PREFIX}/policy/verification/reports/{{report_id}}",
+        response_model=PolicyVerificationReportResponse,
+    )
+    def get_policy_verification_report_v1(
+        report_id: str,
+        request: Request,
+    ) -> PolicyVerificationReportResponse:
+        return _get_policy_verification_report(report_id, request)
+
+    @app.get(
+        "/policy/verification/reports/{report_id}",
+        response_model=PolicyVerificationReportResponse,
+        deprecated=True,
+    )
+    def get_policy_verification_report_legacy(
+        report_id: str,
+        response: Response,
+        request: Request,
+    ) -> PolicyVerificationReportResponse:
+        _set_deprecation_headers(response)
+        return _get_policy_verification_report(report_id, request)
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
