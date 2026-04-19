@@ -62,6 +62,9 @@ class ActionQueue(Protocol):
     def replay_dead_letter(self, job_id: str) -> ActionJob:
         ...
 
+    def quarantine(self, job_id: str, *, reason: str) -> ActionJob:
+        ...
+
 
 class QueueStore(Protocol):
     def save(self, payload: dict[str, Any]) -> None:
@@ -273,6 +276,33 @@ class InMemoryActionQueue:
         except ValueError:
             pass
         self._ready.append(job_id)
+        self._persist_state()
+        return job
+
+    def quarantine(self, job_id: str, *, reason: str) -> ActionJob:
+        job = self._jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+
+        reason_text = reason.strip()
+        if not reason_text:
+            raise ValueError("reason is required")
+
+        if job.status == JobStatus.COMPLETED:
+            raise ValueError("cannot quarantine completed job")
+
+        now = self._now()
+        job.status = JobStatus.DEAD_LETTER
+        job.last_error = reason_text
+        job.lease_worker_id = None
+        job.lease_expires_at = None
+        job.updated_at = now
+
+        self._leases.pop(job_id, None)
+        self._ready = deque(queued_job_id for queued_job_id in self._ready if queued_job_id != job_id)
+        if job_id not in self._dead_letter:
+            self._dead_letter.append(job_id)
+
         self._persist_state()
         return job
 

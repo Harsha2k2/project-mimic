@@ -1,3 +1,5 @@
+import pytest
+
 from project_mimic.queue_runtime import InMemoryActionQueue, JobStatus, JsonFileQueueStore
 
 
@@ -146,3 +148,25 @@ def test_idempotency_ttl_persists_across_reinit(tmp_path) -> None:
     after_expiry = InMemoryActionQueue(now_fn=clock.now, store=store, idempotency_ttl_seconds=10)
     third = after_expiry.dispatch({"action": "type"}, idempotency_key="persist-key")
     assert third.job_id != first.job_id
+
+
+def test_quarantine_moves_queued_job_to_dead_letter() -> None:
+    queue = InMemoryActionQueue()
+
+    job = queue.dispatch({"action": "click"}, idempotency_key="quarantine-1")
+    quarantined = queue.quarantine(job.job_id, reason="manual triage")
+
+    assert quarantined.status == JobStatus.DEAD_LETTER
+    assert quarantined.last_error == "manual triage"
+    assert len(queue.list_dead_letter()) == 1
+
+
+def test_quarantine_rejects_completed_job() -> None:
+    queue = InMemoryActionQueue()
+
+    job = queue.dispatch({"action": "click"}, idempotency_key="quarantine-2")
+    queue.lease_next("worker-a")
+    queue.ack("worker-a", job.job_id)
+
+    with pytest.raises(ValueError, match="cannot quarantine completed job"):
+        queue.quarantine(job.job_id, reason="manual triage")

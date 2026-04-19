@@ -39,7 +39,7 @@ Execution rule for this backlog:
 ## Needed + Partial (P1)
 
 26. [x] Build operator web console for sessions, traces, artifacts, and queue state.
-27. [ ] Build CLI for operational workflows (restore, rollback, replay, quarantine).
+27. [x] Build CLI for operational workflows (restore, rollback, replay, quarantine).
 28. [ ] Publish official SDKs (Python and TypeScript) for client integration.
 29. [ ] Add webhook/event subscription system for lifecycle events.
 30. [ ] Add async job API for long-running flows (submit, poll, cancel).
