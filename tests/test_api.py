@@ -470,6 +470,41 @@ def test_request_timeout_returns_504(monkeypatch) -> None:
     assert response.json()["error"]["code"] == "REQUEST_TIMEOUT"
 
 
+def test_security_headers_are_added_to_responses() -> None:
+    client = TestClient(create_app())
+
+    response = client.get("/api/v1/metrics")
+    assert response.status_code == 200
+    assert response.headers.get("X-Content-Type-Options") == "nosniff"
+    assert response.headers.get("X-Frame-Options") == "DENY"
+    assert response.headers.get("Referrer-Policy") == "no-referrer"
+    assert response.headers.get("Permissions-Policy") == "geolocation=(), microphone=(), camera=()"
+    assert response.headers.get("Cross-Origin-Opener-Policy") == "same-origin"
+    assert response.headers.get("Cross-Origin-Resource-Policy") == "same-origin"
+
+
+def test_cors_allows_explicit_origin_and_blocks_others(monkeypatch) -> None:
+    monkeypatch.setenv("API_CORS_ALLOW_ORIGINS", "https://app.example")
+    monkeypatch.setenv("API_CORS_ALLOW_METHODS", "GET,POST,OPTIONS")
+    monkeypatch.setenv("API_CORS_ALLOW_HEADERS", "Content-Type,X-API-Key")
+    app = create_app()
+    client = TestClient(app)
+
+    preflight = client.options(
+        "/api/v1/metrics",
+        headers={
+            "Origin": "https://app.example",
+            "Access-Control-Request-Method": "GET",
+        },
+    )
+    assert preflight.status_code in {200, 204}
+    assert preflight.headers.get("access-control-allow-origin") == "https://app.example"
+
+    blocked = client.get("/api/v1/metrics", headers={"Origin": "https://evil.example"})
+    assert blocked.status_code == 200
+    assert blocked.headers.get("access-control-allow-origin") is None
+
+
 def test_audit_logs_capture_mutations_and_require_admin(monkeypatch) -> None:
     monkeypatch.setenv("API_AUTH_KEYS", "admin-key,operator-key")
     monkeypatch.setenv("API_AUTH_ROLE_MAP", "admin-key:admin,operator-key:operator")

@@ -21,7 +21,7 @@ Execution rule for this backlog:
 9. [x] Add durable queue backend for worker jobs.
 10. [x] Add persistent idempotency key store with TTL and replay protection.
 11. [x] Add strict request size limits and timeout guards on public APIs.
-12. [ ] Add hardened CORS and edge security policy defaults.
+12. [x] Add hardened CORS and edge security policy defaults.
 13. [ ] Add CI security scans (SAST, dependency CVE scan, container scan).
 14. [ ] Add SBOM generation and enforcement in CI.
 15. [ ] Add signed container images and verification policy.

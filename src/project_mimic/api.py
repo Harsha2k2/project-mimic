@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ConfigDict, Field
 
@@ -267,6 +268,26 @@ def create_app() -> FastAPI:
         "false",
         "no",
     }
+    cors_allow_origins = [item.strip() for item in os.getenv("API_CORS_ALLOW_ORIGINS", "").split(",") if item.strip()]
+    cors_allow_credentials = os.getenv("API_CORS_ALLOW_CREDENTIALS", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    cors_allow_methods = [
+        item.strip().upper()
+        for item in os.getenv("API_CORS_ALLOW_METHODS", "GET,POST,PUT,PATCH,DELETE,OPTIONS").split(",")
+        if item.strip()
+    ]
+    cors_allow_headers = [
+        item.strip()
+        for item in os.getenv(
+            "API_CORS_ALLOW_HEADERS",
+            "Authorization,Content-Type,X-API-Key,X-Request-ID,X-Tenant-ID",
+        ).split(",")
+        if item.strip()
+    ]
     rate_limit_per_minute = int(os.getenv("API_RATE_LIMIT_PER_MINUTE", "0"))
     daily_quota = int(os.getenv("API_DAILY_QUOTA", "0"))
     max_request_body_bytes = int(os.getenv("API_MAX_REQUEST_BODY_BYTES", "0"))
@@ -276,6 +297,14 @@ def create_app() -> FastAPI:
     audit_events: list[dict[str, Any]] = []
     metadata_store_type = os.getenv("SESSION_METADATA_STORE", "memory").strip().lower()
     metadata_store_file_path = os.getenv("SESSION_METADATA_FILE_PATH", "")
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_allow_origins,
+        allow_credentials=cors_allow_credentials,
+        allow_methods=cors_allow_methods,
+        allow_headers=cors_allow_headers,
+    )
 
     role_map: dict[str, str] = {}
     for pair in os.getenv("API_AUTH_ROLE_MAP", "").split(","):
@@ -888,6 +917,17 @@ def create_app() -> FastAPI:
         metrics.record(request.url.path, response.status_code, elapsed_ms)
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Correlation-ID"] = request_id
+        return response
+
+    @app.middleware("http")
+    async def security_headers_middleware(request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+        response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+        response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
         return response
 
     @app.exception_handler(RequestValidationError)
