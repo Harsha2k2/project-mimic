@@ -63,6 +63,38 @@ jobs:
             aquasec/trivy:latest \
             fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 /src
 
+  sbom:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: sbom.spdx.json
+          artifact-name: project-mimic-sbom
+
+      - name: Validate SBOM contents
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          sbom_path = Path('sbom.spdx.json')
+          assert sbom_path.exists(), 'sbom.spdx.json was not generated'
+
+          payload = json.loads(sbom_path.read_text(encoding='utf-8'))
+          package_names = {
+              package.get('name')
+              for package in payload.get('packages', [])
+              if isinstance(package, dict)
+          }
+          assert 'project-mimic' in package_names
+          PY
+
   python-tests:
     runs-on: ubuntu-latest
     steps:
