@@ -51,7 +51,7 @@ Execution rule for this backlog:
 36. [x] Add feature flag service for safe progressive rollout.
 37. [x] Add tenant usage metering tied to billable dimensions.
 38. [x] Add billing primitives (plan limits, overage protection, monthly reports).
-39. [ ] Add legal-hold-aware retention controls for artifacts.
+39. [x] Add legal-hold-aware retention controls for artifacts.
 40. [ ] Add data residency policy enforcement by tenant and region.
 41. [ ] Add consent and allowed-target governance controls.
 42. [ ] Add broader browser engine coverage and cross-browser parity tests.

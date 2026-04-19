@@ -85,6 +85,11 @@ class ArtifactIndex:
         if not self._by_session[record.session_id]:
             self._by_session.pop(record.session_id, None)
 
+    def update(self, record: ArtifactRecord) -> None:
+        if record.artifact_id not in self._by_id:
+            raise KeyError(record.artifact_id)
+        self._by_id[record.artifact_id] = record
+
     def lookup(
         self,
         *,
@@ -195,6 +200,8 @@ class InMemoryArtifactWriter:
 class ArtifactRetentionPolicy:
     max_age_seconds: int
     max_artifacts_per_session: int
+    legal_hold_metadata_key: str = "legal_hold"
+    legal_hold_case_id_metadata_key: str = "legal_hold_case_id"
 
 
 class ArtifactManager:
@@ -275,11 +282,45 @@ class ArtifactManager:
         checksum = hashlib.sha256(content).hexdigest()
         return checksum == record.checksum_sha256
 
+    def set_legal_hold(self, artifact_id: str, *, case_id: str, reason: str | None = None) -> ArtifactRecord:
+        if not case_id.strip():
+            raise ValueError("case_id must not be empty")
+
+        record = self.index.get(artifact_id)
+        metadata = dict(record.metadata)
+        metadata["legal_hold"] = "true"
+        metadata["legal_hold_case_id"] = case_id
+        if reason is not None and reason.strip():
+            metadata["legal_hold_reason"] = reason
+        updated = replace(record, metadata=metadata)
+        self.index.update(updated)
+        return updated
+
+    def clear_legal_hold(self, artifact_id: str) -> ArtifactRecord:
+        record = self.index.get(artifact_id)
+        metadata = dict(record.metadata)
+        metadata["legal_hold"] = "false"
+        metadata.pop("legal_hold_case_id", None)
+        metadata.pop("legal_hold_reason", None)
+        updated = replace(record, metadata=metadata)
+        self.index.update(updated)
+        return updated
+
+    def list_legal_holds(self, *, session_id: str | None = None) -> list[ArtifactRecord]:
+        records = self.index.lookup(session_id=session_id)
+        return [record for record in records if self._is_legal_hold(record, key="legal_hold", case_key="legal_hold_case_id")]
+
     def cleanup(self, retention: ArtifactRetentionPolicy) -> int:
         now = self._now()
         removed = 0
 
         for record in sorted(self.index.all(), key=lambda item: item.created_at):
+            if self._is_legal_hold(
+                record,
+                key=retention.legal_hold_metadata_key,
+                case_key=retention.legal_hold_case_id_metadata_key,
+            ):
+                continue
             too_old = (now - record.created_at) > retention.max_age_seconds
             if too_old:
                 self._delete_record(record)
@@ -291,7 +332,17 @@ class ArtifactManager:
                 key=lambda item: item.created_at,
                 reverse=True,
             )
-            for record in items[retention.max_artifacts_per_session :]:
+            unheld_seen = 0
+            for record in items:
+                if self._is_legal_hold(
+                    record,
+                    key=retention.legal_hold_metadata_key,
+                    case_key=retention.legal_hold_case_id_metadata_key,
+                ):
+                    continue
+                unheld_seen += 1
+                if unheld_seen <= retention.max_artifacts_per_session:
+                    continue
                 self._delete_record(record)
                 removed += 1
 
@@ -303,6 +354,15 @@ class ArtifactManager:
             writer.delete_artifact(record)
         self._writer_by_artifact_id.pop(record.artifact_id, None)
         self.index.remove(record.artifact_id)
+
+    @staticmethod
+    def _is_legal_hold(record: ArtifactRecord, *, key: str, case_key: str) -> bool:
+        hold_value = str(record.metadata.get(key, "")).strip().lower()
+        if hold_value in {"1", "true", "yes", "on"}:
+            return True
+
+        case_value = str(record.metadata.get(case_key, "")).strip()
+        return bool(case_value)
 
     def _attach_backend(self, record: ArtifactRecord, backend_name: str) -> ArtifactRecord:
         metadata = dict(record.metadata)

@@ -59,6 +59,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/43-feature-flag-service-for-safe-progressive-rollout.md`
   - `lld/44-tenant-usage-metering-tied-to-billable-dimensions.md`
   - `lld/45-billing-primitives-plan-limits-overage-protection-monthly-reports.md`
+  - `lld/46-legal-hold-aware-retention-controls-for-artifacts.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
