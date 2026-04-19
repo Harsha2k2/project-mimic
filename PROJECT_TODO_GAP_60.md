@@ -32,7 +32,7 @@ Execution rule for this backlog:
 20. [x] Add end-to-end tests with real browser workers in CI.
 21. [x] Add integration lane with real Triton/GPU inference path.
 22. [x] Add load and stress tests with capacity thresholds as release gates.
-23. [ ] Add SLO burn-rate alerts wired to on-call paging.
+23. [x] Add SLO burn-rate alerts wired to on-call paging.
 24. [ ] Add runbook automation for common incident classes.
 25. [ ] Add compliance-safe data deletion workflows.
 

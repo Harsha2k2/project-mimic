@@ -43,6 +43,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/27-end-to-end-tests-with-real-browser-workers-in-ci.md`
   - `lld/28-integration-lane-with-real-triton-gpu-inference-path.md`
   - `lld/29-load-and-stress-tests-with-capacity-thresholds-as-release-gates.md`
+  - `lld/30-slo-burn-rate-alerts-wired-to-on-call-paging.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

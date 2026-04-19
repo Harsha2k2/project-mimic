@@ -1,0 +1,6 @@
+{
+  "service_name": "project-mimic-api",
+  "burn_rate": 1.0,
+  "error_budget_remaining": 0.99,
+  "window_minutes": 60
+}

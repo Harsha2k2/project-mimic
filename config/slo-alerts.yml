@@ -1,0 +1,4 @@
+warning_burn_rate: 1.5
+paging_burn_rate: 2.0
+service_name: project-mimic-api
+on_call_target: sre-oncall
