@@ -25,7 +25,7 @@ Execution rule for this backlog:
 13. [x] Add CI security scans (SAST, dependency CVE scan, container scan).
 14. [x] Add SBOM generation and enforcement in CI.
 15. [x] Add signed container images and verification policy.
-16. [ ] Add secret rotation automation with expiry alarms.
+16. [x] Add secret rotation automation with expiry alarms.
 17. [ ] Add disaster recovery backup and restore automation and validation.
 18. [ ] Add canary deployment with automatic rollback on SLO breach.
 19. [ ] Add deployment pipeline gates for Helm and manifest policy checks.
