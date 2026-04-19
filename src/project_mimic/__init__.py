@@ -87,6 +87,11 @@ from .observability import InMemoryMetrics, OpenTelemetryTracer, TraceSpan
 from .policy import PolicyContext, PolicyDecision, PolicyEngine
 from .queue_runtime import ActionJob, InMemoryActionQueue, JobStatus, WorkerLease
 from .queue_runtime import InMemoryQueueStore, JsonFileQueueStore, QueueStore
+from .regional_failover import (
+    InMemoryRegionalFailoverStore,
+    JsonFileRegionalFailoverStore,
+    RegionalFailoverOrchestrator,
+)
 from .reliability import (
     BackoffPolicy,
     CheckpointRecoveryError,
@@ -239,6 +244,9 @@ __all__ = [
     "UIAction",
     "ActionJob",
     "QueueStore",
+    "InMemoryRegionalFailoverStore",
+    "JsonFileRegionalFailoverStore",
+    "RegionalFailoverOrchestrator",
     "TimeoutFailure",
     "TransientDependencyError",
     "WebhookAuditExportSink",

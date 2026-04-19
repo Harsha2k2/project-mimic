@@ -49,6 +49,11 @@ from .observability import InMemoryMetrics, OpenTelemetryTracer
 from .policy_explorer import InMemoryPolicyDecisionStore, JsonFilePolicyDecisionStore, PolicyDecisionExplorer
 from .queue_runtime import ActionJob, InMemoryActionQueue, JsonFileQueueStore
 from .review_queue import HumanReviewQueue, InMemoryReviewQueueStore, JsonFileReviewQueueStore
+from .regional_failover import (
+    InMemoryRegionalFailoverStore,
+    JsonFileRegionalFailoverStore,
+    RegionalFailoverOrchestrator,
+)
 from .security import redact_sensitive_structure, redact_sensitive_text
 from .synthetic_monitoring import SyntheticMonitor
 from .orchestrator.decision_orchestrator import DecisionOrchestrator
@@ -603,6 +608,69 @@ class ControlPlaneTopologyResponse(APIPayloadModel):
     updated_at: float
 
 
+class RegionalFailoverPolicyUpsertRequest(APIPayloadModel):
+    primary_region: str
+    secondary_region: str
+    read_traffic_percent: dict[str, float] = Field(default_factory=dict)
+    write_region: str | None = None
+    auto_failback: bool = False
+
+
+class RegionalFailoverPolicyResponse(APIPayloadModel):
+    policy_id: str
+    primary_region: str
+    secondary_region: str
+    read_traffic_percent: dict[str, float] = Field(default_factory=dict)
+    write_region: str
+    auto_failback: bool
+    last_applied_at: float | None = None
+    created_at: float
+    updated_at: float
+
+
+class RegionalFailoverPolicyListResponse(APIPayloadModel):
+    items: list[RegionalFailoverPolicyResponse]
+    total: int
+
+
+class RegionalFailoverAppliedRegionResponse(APIPayloadModel):
+    region_id: str
+    read_percent: float
+    read_enabled: bool
+    write_enabled: bool
+
+
+class RegionalFailoverApplyResponse(APIPayloadModel):
+    policy_id: str
+    write_region: str
+    initiated_by: str
+    applied_at: float
+    applied_regions: list[RegionalFailoverAppliedRegionResponse] = Field(default_factory=list)
+
+
+class RegionalFailoverExecuteRequest(APIPayloadModel):
+    policy_id: str
+    target_region: str
+    reason: str
+
+
+class RegionalFailoverRecoverRequest(APIPayloadModel):
+    policy_id: str
+    reason: str
+
+
+class RegionalFailoverStatusResponse(APIPayloadModel):
+    policy_id: str
+    active: bool
+    target_region: str | None = None
+    reason: str | None = None
+    initiated_by: str | None = None
+    recovered_by: str | None = None
+    started_at: float | None = None
+    resolved_at: float | None = None
+    updated_at: float
+
+
 class GovernancePolicyUpsertRequest(APIPayloadModel):
     consent_required: bool = False
     allowed_target_patterns: list[str] = Field(default_factory=list)
@@ -833,6 +901,8 @@ def create_app() -> FastAPI:
     data_residency_default_region = os.getenv("DATA_RESIDENCY_DEFAULT_REGION", "global").strip().lower() or "global"
     multi_region_control_plane_store_type = os.getenv("MULTI_REGION_CONTROL_PLANE_STORE", "memory").strip().lower()
     multi_region_control_plane_file_path = os.getenv("MULTI_REGION_CONTROL_PLANE_FILE_PATH", "")
+    regional_failover_store_type = os.getenv("REGIONAL_FAILOVER_STORE", "memory").strip().lower()
+    regional_failover_file_path = os.getenv("REGIONAL_FAILOVER_FILE_PATH", "")
     governance_policy_store_type = os.getenv("GOVERNANCE_POLICY_STORE", "memory").strip().lower()
     governance_policy_file_path = os.getenv("GOVERNANCE_POLICY_FILE_PATH", "")
     governance_enforcement_enabled = os.getenv("GOVERNANCE_ENFORCEMENT_ENABLED", "false").strip().lower() in {
@@ -1018,6 +1088,13 @@ def create_app() -> FastAPI:
     else:
         multi_region_control_plane_store = InMemoryMultiRegionControlPlaneStore()
 
+    if regional_failover_store_type == "file":
+        if not regional_failover_file_path:
+            raise RuntimeError("REGIONAL_FAILOVER_FILE_PATH is required when REGIONAL_FAILOVER_STORE=file")
+        regional_failover_store = JsonFileRegionalFailoverStore(regional_failover_file_path)
+    else:
+        regional_failover_store = InMemoryRegionalFailoverStore()
+
     if governance_policy_store_type == "file":
         if not governance_policy_file_path:
             raise RuntimeError("GOVERNANCE_POLICY_FILE_PATH is required when GOVERNANCE_POLICY_STORE=file")
@@ -1058,6 +1135,10 @@ def create_app() -> FastAPI:
     billing = BillingPrimitives(store=billing_store)
     data_residency = TenantDataResidencyPolicyService(store=data_residency_store)
     multi_region_control_plane = MultiRegionControlPlaneService(store=multi_region_control_plane_store)
+    regional_failover = RegionalFailoverOrchestrator(
+        control_plane=multi_region_control_plane,
+        store=regional_failover_store,
+    )
     governance_controls = ConsentTargetGovernanceService(store=governance_policy_store)
     drift_monitor = DriftMonitor(
         baseline_window=drift_baseline_window,
@@ -1135,6 +1216,10 @@ def create_app() -> FastAPI:
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/control-plane/topology") or path.startswith("/control-plane/topology"):
             return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/control-plane/failover/status") or path.startswith("/control-plane/failover/status"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/control-plane/failover") or path.startswith("/control-plane/failover"):
+            return "admin"
         if path.startswith(f"{API_V1_PREFIX}/control-plane") or path.startswith("/control-plane"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
@@ -1914,6 +1999,164 @@ def create_app() -> FastAPI:
             reason=str(routed.get("reason", "weighted_active_active_routing")),
             routed_at=float(routed.get("routed_at", time.time())),
         )
+
+    def _to_regional_failover_policy_response(payload: dict[str, Any]) -> RegionalFailoverPolicyResponse:
+        return RegionalFailoverPolicyResponse(
+            policy_id=str(payload.get("policy_id", "")),
+            primary_region=str(payload.get("primary_region", "")),
+            secondary_region=str(payload.get("secondary_region", "")),
+            read_traffic_percent={
+                str(region): float(percent)
+                for region, percent in dict(payload.get("read_traffic_percent", {})).items()
+            },
+            write_region=str(payload.get("write_region", "")),
+            auto_failback=bool(payload.get("auto_failback", False)),
+            last_applied_at=(
+                None
+                if payload.get("last_applied_at") is None
+                else float(payload.get("last_applied_at"))
+            ),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _upsert_regional_failover_policy(
+        policy_id: str,
+        payload: RegionalFailoverPolicyUpsertRequest,
+    ) -> RegionalFailoverPolicyResponse:
+        try:
+            policy = regional_failover.upsert_policy(
+                policy_id=policy_id,
+                primary_region=payload.primary_region,
+                secondary_region=payload.secondary_region,
+                read_traffic_percent=payload.read_traffic_percent,
+                write_region=payload.write_region,
+                auto_failback=payload.auto_failback,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_regional_failover_policy_response(policy)
+
+    def _get_regional_failover_policy(policy_id: str) -> RegionalFailoverPolicyResponse:
+        try:
+            policy = regional_failover.get_policy(policy_id=policy_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="regional failover policy not found") from exc
+        return _to_regional_failover_policy_response(policy)
+
+    def _list_regional_failover_policies() -> RegionalFailoverPolicyListResponse:
+        items = [
+            _to_regional_failover_policy_response(item)
+            for item in regional_failover.list_policies()
+        ]
+        return RegionalFailoverPolicyListResponse(items=items, total=len(items))
+
+    def _to_regional_failover_apply_response(payload: dict[str, Any]) -> RegionalFailoverApplyResponse:
+        return RegionalFailoverApplyResponse(
+            policy_id=str(payload.get("policy_id", "")),
+            write_region=str(payload.get("write_region", "")),
+            initiated_by=str(payload.get("initiated_by", "")),
+            applied_at=float(payload.get("applied_at", 0.0)),
+            applied_regions=[
+                RegionalFailoverAppliedRegionResponse(
+                    region_id=str(item.get("region_id", "")),
+                    read_percent=float(item.get("read_percent", 0.0)),
+                    read_enabled=bool(item.get("read_enabled", False)),
+                    write_enabled=bool(item.get("write_enabled", False)),
+                )
+                for item in payload.get("applied_regions", [])
+                if isinstance(item, dict)
+            ],
+        )
+
+    def _apply_regional_failover_policy(policy_id: str, request: Request) -> RegionalFailoverApplyResponse:
+        initiated_by = str(getattr(request.state, "api_key_id", "")) or "unknown"
+        try:
+            payload = regional_failover.apply_policy(policy_id=policy_id, initiated_by=initiated_by)
+        except (KeyError, ValueError) as exc:
+            if isinstance(exc, KeyError):
+                raise HTTPException(status_code=404, detail="regional failover policy not found") from exc
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_regional_failover_apply_response(payload)
+
+    def _to_regional_failover_status_response(payload: dict[str, Any]) -> RegionalFailoverStatusResponse:
+        return RegionalFailoverStatusResponse(
+            policy_id=str(payload.get("policy_id", "")),
+            active=bool(payload.get("active", False)),
+            target_region=(
+                None
+                if payload.get("target_region") in {None, ""}
+                else str(payload.get("target_region"))
+            ),
+            reason=(
+                None
+                if payload.get("reason") in {None, ""}
+                else str(payload.get("reason"))
+            ),
+            initiated_by=(
+                None
+                if payload.get("initiated_by") in {None, ""}
+                else str(payload.get("initiated_by"))
+            ),
+            recovered_by=(
+                None
+                if payload.get("recovered_by") in {None, ""}
+                else str(payload.get("recovered_by"))
+            ),
+            started_at=(
+                None
+                if payload.get("started_at") is None
+                else float(payload.get("started_at"))
+            ),
+            resolved_at=(
+                None
+                if payload.get("resolved_at") is None
+                else float(payload.get("resolved_at"))
+            ),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _execute_regional_failover(
+        payload: RegionalFailoverExecuteRequest,
+        request: Request,
+    ) -> RegionalFailoverStatusResponse:
+        initiated_by = str(getattr(request.state, "api_key_id", "")) or "unknown"
+        try:
+            status = regional_failover.execute_failover(
+                policy_id=payload.policy_id,
+                target_region=payload.target_region,
+                reason=payload.reason,
+                initiated_by=initiated_by,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="regional failover policy not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_regional_failover_status_response(status)
+
+    def _recover_regional_failover(
+        payload: RegionalFailoverRecoverRequest,
+        request: Request,
+    ) -> RegionalFailoverStatusResponse:
+        recovered_by = str(getattr(request.state, "api_key_id", "")) or "unknown"
+        try:
+            status = regional_failover.recover_failover(
+                policy_id=payload.policy_id,
+                reason=payload.reason,
+                recovered_by=recovered_by,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="regional failover policy not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_regional_failover_status_response(status)
+
+    def _regional_failover_status(policy_id: str) -> RegionalFailoverStatusResponse:
+        try:
+            status = regional_failover.status(policy_id=policy_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="regional failover policy not found") from exc
+        return _to_regional_failover_status_response(status)
 
     def _data_residency_enforcement_response(request: Request, request_id: str, tenant_id: str) -> JSONResponse | None:
         region = _region_from_request(request)
@@ -4340,6 +4583,231 @@ def create_app() -> FastAPI:
             details={"operation": routed.operation, "reason": routed.reason},
         )
         return routed
+
+    @app.post(
+        f"{API_V1_PREFIX}/control-plane/failover/policies/{{policy_id}}",
+        response_model=RegionalFailoverPolicyResponse,
+    )
+    def upsert_regional_failover_policy_v1(
+        policy_id: str,
+        payload: RegionalFailoverPolicyUpsertRequest,
+        request: Request,
+    ) -> RegionalFailoverPolicyResponse:
+        policy = _upsert_regional_failover_policy(policy_id, payload)
+        _append_audit_event(
+            request,
+            action="control_plane.failover.policy.upsert",
+            resource_type="control_plane_failover_policy",
+            resource_id=policy.policy_id,
+            details={
+                "primary_region": policy.primary_region,
+                "secondary_region": policy.secondary_region,
+                "write_region": policy.write_region,
+                "auto_failback": policy.auto_failback,
+            },
+        )
+        return policy
+
+    @app.post(
+        "/control-plane/failover/policies/{policy_id}",
+        response_model=RegionalFailoverPolicyResponse,
+        deprecated=True,
+    )
+    def upsert_regional_failover_policy_legacy(
+        policy_id: str,
+        payload: RegionalFailoverPolicyUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> RegionalFailoverPolicyResponse:
+        _set_deprecation_headers(response)
+        policy = _upsert_regional_failover_policy(policy_id, payload)
+        _append_audit_event(
+            request,
+            action="control_plane.failover.policy.upsert",
+            resource_type="control_plane_failover_policy",
+            resource_id=policy.policy_id,
+            details={
+                "primary_region": policy.primary_region,
+                "secondary_region": policy.secondary_region,
+                "write_region": policy.write_region,
+                "auto_failback": policy.auto_failback,
+            },
+        )
+        return policy
+
+    @app.get(
+        f"{API_V1_PREFIX}/control-plane/failover/policies",
+        response_model=RegionalFailoverPolicyListResponse,
+    )
+    def list_regional_failover_policies_v1() -> RegionalFailoverPolicyListResponse:
+        return _list_regional_failover_policies()
+
+    @app.get(
+        "/control-plane/failover/policies",
+        response_model=RegionalFailoverPolicyListResponse,
+        deprecated=True,
+    )
+    def list_regional_failover_policies_legacy(response: Response) -> RegionalFailoverPolicyListResponse:
+        _set_deprecation_headers(response)
+        return _list_regional_failover_policies()
+
+    @app.get(
+        f"{API_V1_PREFIX}/control-plane/failover/policies/{{policy_id}}",
+        response_model=RegionalFailoverPolicyResponse,
+    )
+    def get_regional_failover_policy_v1(policy_id: str) -> RegionalFailoverPolicyResponse:
+        return _get_regional_failover_policy(policy_id)
+
+    @app.get(
+        "/control-plane/failover/policies/{policy_id}",
+        response_model=RegionalFailoverPolicyResponse,
+        deprecated=True,
+    )
+    def get_regional_failover_policy_legacy(
+        policy_id: str,
+        response: Response,
+    ) -> RegionalFailoverPolicyResponse:
+        _set_deprecation_headers(response)
+        return _get_regional_failover_policy(policy_id)
+
+    @app.post(
+        f"{API_V1_PREFIX}/control-plane/failover/policies/{{policy_id}}/apply",
+        response_model=RegionalFailoverApplyResponse,
+    )
+    def apply_regional_failover_policy_v1(policy_id: str, request: Request) -> RegionalFailoverApplyResponse:
+        applied = _apply_regional_failover_policy(policy_id, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="control_plane_failover_apply", units=1.0)
+        _append_audit_event(
+            request,
+            action="control_plane.failover.policy.apply",
+            resource_type="control_plane_failover_policy",
+            resource_id=policy_id,
+            details={"write_region": applied.write_region},
+        )
+        return applied
+
+    @app.post(
+        "/control-plane/failover/policies/{policy_id}/apply",
+        response_model=RegionalFailoverApplyResponse,
+        deprecated=True,
+    )
+    def apply_regional_failover_policy_legacy(
+        policy_id: str,
+        response: Response,
+        request: Request,
+    ) -> RegionalFailoverApplyResponse:
+        _set_deprecation_headers(response)
+        applied = _apply_regional_failover_policy(policy_id, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="control_plane_failover_apply", units=1.0)
+        _append_audit_event(
+            request,
+            action="control_plane.failover.policy.apply",
+            resource_type="control_plane_failover_policy",
+            resource_id=policy_id,
+            details={"write_region": applied.write_region},
+        )
+        return applied
+
+    @app.post(
+        f"{API_V1_PREFIX}/control-plane/failover/execute",
+        response_model=RegionalFailoverStatusResponse,
+    )
+    def execute_regional_failover_v1(
+        payload: RegionalFailoverExecuteRequest,
+        request: Request,
+    ) -> RegionalFailoverStatusResponse:
+        status = _execute_regional_failover(payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="control_plane_failover_execute", units=1.0)
+        _append_audit_event(
+            request,
+            action="control_plane.failover.execute",
+            resource_type="control_plane_failover_policy",
+            resource_id=payload.policy_id,
+            details={"target_region": payload.target_region, "reason": payload.reason},
+        )
+        return status
+
+    @app.post(
+        "/control-plane/failover/execute",
+        response_model=RegionalFailoverStatusResponse,
+        deprecated=True,
+    )
+    def execute_regional_failover_legacy(
+        payload: RegionalFailoverExecuteRequest,
+        response: Response,
+        request: Request,
+    ) -> RegionalFailoverStatusResponse:
+        _set_deprecation_headers(response)
+        status = _execute_regional_failover(payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="control_plane_failover_execute", units=1.0)
+        _append_audit_event(
+            request,
+            action="control_plane.failover.execute",
+            resource_type="control_plane_failover_policy",
+            resource_id=payload.policy_id,
+            details={"target_region": payload.target_region, "reason": payload.reason},
+        )
+        return status
+
+    @app.post(
+        f"{API_V1_PREFIX}/control-plane/failover/recover",
+        response_model=RegionalFailoverStatusResponse,
+    )
+    def recover_regional_failover_v1(
+        payload: RegionalFailoverRecoverRequest,
+        request: Request,
+    ) -> RegionalFailoverStatusResponse:
+        status = _recover_regional_failover(payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="control_plane_failover_recover", units=1.0)
+        _append_audit_event(
+            request,
+            action="control_plane.failover.recover",
+            resource_type="control_plane_failover_policy",
+            resource_id=payload.policy_id,
+            details={"reason": payload.reason},
+        )
+        return status
+
+    @app.post(
+        "/control-plane/failover/recover",
+        response_model=RegionalFailoverStatusResponse,
+        deprecated=True,
+    )
+    def recover_regional_failover_legacy(
+        payload: RegionalFailoverRecoverRequest,
+        response: Response,
+        request: Request,
+    ) -> RegionalFailoverStatusResponse:
+        _set_deprecation_headers(response)
+        status = _recover_regional_failover(payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="control_plane_failover_recover", units=1.0)
+        _append_audit_event(
+            request,
+            action="control_plane.failover.recover",
+            resource_type="control_plane_failover_policy",
+            resource_id=payload.policy_id,
+            details={"reason": payload.reason},
+        )
+        return status
+
+    @app.get(
+        f"{API_V1_PREFIX}/control-plane/failover/status/{{policy_id}}",
+        response_model=RegionalFailoverStatusResponse,
+    )
+    def regional_failover_status_v1(policy_id: str) -> RegionalFailoverStatusResponse:
+        return _regional_failover_status(policy_id)
+
+    @app.get(
+        "/control-plane/failover/status/{policy_id}",
+        response_model=RegionalFailoverStatusResponse,
+        deprecated=True,
+    )
+    def regional_failover_status_legacy(
+        policy_id: str,
+        response: Response,
+    ) -> RegionalFailoverStatusResponse:
+        _set_deprecation_headers(response)
+        return _regional_failover_status(policy_id)
 
     @app.post(f"{API_V1_PREFIX}/governance/policies/{{tenant_id}}", response_model=GovernancePolicyResponse)
     def upsert_governance_policy_v1(
