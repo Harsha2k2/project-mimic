@@ -62,6 +62,11 @@ from .policy_verification import (
     JsonFilePolicyVerificationStore,
     PolicyVerificationService,
 )
+from .privacy_analytics import (
+    InMemoryPrivacyAnalyticsStore,
+    JsonFilePrivacyAnalyticsStore,
+    PrivacyPreservingAnalyticsService,
+)
 from .predictive_autoscaling import (
     InMemoryPredictiveAutoscalingStore,
     JsonFilePredictiveAutoscalingStore,
@@ -1129,6 +1134,86 @@ class PolicyVerificationReportListResponse(APIPayloadModel):
     total: int
 
 
+class PrivacyAnalyticsPolicyUpsertRequest(APIPayloadModel):
+    epsilon: float = Field(gt=0.0)
+    min_group_size: int = Field(ge=1)
+    max_groups: int = Field(ge=1)
+    redact_dimension_keys: list[str] = Field(default_factory=list)
+    noise_seed: str | None = None
+
+
+class PrivacyAnalyticsPolicyResponse(APIPayloadModel):
+    tenant_id: str
+    epsilon: float
+    min_group_size: int
+    max_groups: int
+    redact_dimension_keys: list[str] = Field(default_factory=list)
+    noise_seed: str
+    created_at: float
+    updated_at: float
+
+
+class PrivacyAnalyticsPolicyListResponse(APIPayloadModel):
+    items: list[PrivacyAnalyticsPolicyResponse]
+    total: int
+
+
+class PrivacyAnalyticsEventIngestRequest(APIPayloadModel):
+    tenant_id: str | None = None
+    metric_name: str
+    value: float = Field(ge=0.0)
+    dimensions: dict[str, str] = Field(default_factory=dict)
+    observed_at: float | None = None
+
+
+class PrivacyAnalyticsEventResponse(APIPayloadModel):
+    event_id: str
+    tenant_id: str
+    metric_name: str
+    value: float
+    dimensions: dict[str, str] = Field(default_factory=dict)
+    observed_at: float
+
+
+class PrivacyAnalyticsReportGenerateRequest(APIPayloadModel):
+    tenant_id: str | None = None
+    metric_name: str | None = None
+    start_time: float | None = None
+    end_time: float | None = None
+    group_by: list[str] = Field(default_factory=list)
+
+
+class PrivacyAnalyticsGroupResponse(APIPayloadModel):
+    group: dict[str, str] = Field(default_factory=dict)
+    count: int
+    true_sum: float
+    noisy_sum: float
+    average: float
+    noisy_average: float
+    noise: float
+
+
+class PrivacyAnalyticsReportResponse(APIPayloadModel):
+    report_id: str
+    tenant_id: str
+    metric_name: str | None = None
+    start_time: float | None = None
+    end_time: float | None = None
+    group_by: list[str] = Field(default_factory=list)
+    total_events: int
+    visible_groups: int
+    suppressed_groups: int
+    epsilon: float
+    min_group_size: int
+    groups: list[PrivacyAnalyticsGroupResponse] = Field(default_factory=list)
+    generated_at: float
+
+
+class PrivacyAnalyticsReportListResponse(APIPayloadModel):
+    items: list[PrivacyAnalyticsReportResponse]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1240,6 +1325,8 @@ def create_app() -> FastAPI:
     policy_decision_file_path = os.getenv("POLICY_DECISION_FILE_PATH", "")
     policy_verification_store_type = os.getenv("POLICY_VERIFICATION_STORE", "memory").strip().lower()
     policy_verification_file_path = os.getenv("POLICY_VERIFICATION_FILE_PATH", "")
+    privacy_analytics_store_type = os.getenv("PRIVACY_ANALYTICS_STORE", "memory").strip().lower()
+    privacy_analytics_file_path = os.getenv("PRIVACY_ANALYTICS_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -1464,6 +1551,13 @@ def create_app() -> FastAPI:
     else:
         policy_verification_store = InMemoryPolicyVerificationStore()
 
+    if privacy_analytics_store_type == "file":
+        if not privacy_analytics_file_path:
+            raise RuntimeError("PRIVACY_ANALYTICS_FILE_PATH is required when PRIVACY_ANALYTICS_STORE=file")
+        privacy_analytics_store = JsonFilePrivacyAnalyticsStore(privacy_analytics_file_path)
+    else:
+        privacy_analytics_store = InMemoryPrivacyAnalyticsStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -1606,6 +1700,7 @@ def create_app() -> FastAPI:
         store=policy_decision_store,
     )
     policy_verification = PolicyVerificationService(store=policy_verification_store)
+    privacy_analytics = PrivacyPreservingAnalyticsService(store=privacy_analytics_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -1702,6 +1797,14 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/policy/verification/reports") or path.startswith("/policy/verification/reports"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/policy/verification") or path.startswith("/policy/verification"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/analytics/privacy/reports/generate") or path.startswith("/analytics/privacy/reports/generate"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/analytics/privacy/reports") or path.startswith("/analytics/privacy/reports"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/analytics/privacy/events") or path.startswith("/analytics/privacy/events"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/analytics/privacy") or path.startswith("/analytics/privacy"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -3734,6 +3837,188 @@ def create_app() -> FastAPI:
         if report is None:
             raise HTTPException(status_code=404, detail="policy verification report not found")
         return _to_policy_verification_report_response(report)
+
+    def _to_privacy_analytics_policy_response(payload: dict[str, Any]) -> PrivacyAnalyticsPolicyResponse:
+        return PrivacyAnalyticsPolicyResponse(
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            epsilon=float(payload.get("epsilon", 1.0)),
+            min_group_size=int(payload.get("min_group_size", 1)),
+            max_groups=int(payload.get("max_groups", 1)),
+            redact_dimension_keys=[
+                str(item)
+                for item in payload.get("redact_dimension_keys", [])
+                if isinstance(item, str)
+            ],
+            noise_seed=str(payload.get("noise_seed", default_tenant)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_privacy_analytics_event_response(payload: dict[str, Any]) -> PrivacyAnalyticsEventResponse:
+        return PrivacyAnalyticsEventResponse(
+            event_id=str(payload.get("event_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            metric_name=str(payload.get("metric_name", "")),
+            value=float(payload.get("value", 0.0)),
+            dimensions={
+                str(key): str(value)
+                for key, value in dict(payload.get("dimensions", {})).items()
+            },
+            observed_at=float(payload.get("observed_at", 0.0)),
+        )
+
+    def _to_privacy_analytics_report_response(payload: dict[str, Any]) -> PrivacyAnalyticsReportResponse:
+        groups = []
+        for item in payload.get("groups", []):
+            if not isinstance(item, dict):
+                continue
+            groups.append(
+                PrivacyAnalyticsGroupResponse(
+                    group={
+                        str(key): str(value)
+                        for key, value in dict(item.get("group", {})).items()
+                    },
+                    count=int(item.get("count", 0)),
+                    true_sum=float(item.get("true_sum", 0.0)),
+                    noisy_sum=float(item.get("noisy_sum", 0.0)),
+                    average=float(item.get("average", 0.0)),
+                    noisy_average=float(item.get("noisy_average", 0.0)),
+                    noise=float(item.get("noise", 0.0)),
+                )
+            )
+
+        return PrivacyAnalyticsReportResponse(
+            report_id=str(payload.get("report_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            metric_name=(
+                None
+                if payload.get("metric_name") is None
+                else str(payload.get("metric_name"))
+            ),
+            start_time=(
+                None
+                if payload.get("start_time") is None
+                else float(payload.get("start_time"))
+            ),
+            end_time=(
+                None
+                if payload.get("end_time") is None
+                else float(payload.get("end_time"))
+            ),
+            group_by=[
+                str(item)
+                for item in payload.get("group_by", [])
+                if isinstance(item, str)
+            ],
+            total_events=int(payload.get("total_events", 0)),
+            visible_groups=int(payload.get("visible_groups", 0)),
+            suppressed_groups=int(payload.get("suppressed_groups", 0)),
+            epsilon=float(payload.get("epsilon", 1.0)),
+            min_group_size=int(payload.get("min_group_size", 1)),
+            groups=groups,
+            generated_at=float(payload.get("generated_at", 0.0)),
+        )
+
+    def _upsert_privacy_analytics_policy(
+        tenant_id: str,
+        payload: PrivacyAnalyticsPolicyUpsertRequest,
+        request: Request,
+    ) -> PrivacyAnalyticsPolicyResponse:
+        effective_tenant = _resolve_effective_tenant(request, tenant_id)
+        try:
+            policy = privacy_analytics.upsert_policy(
+                tenant_id=effective_tenant,
+                epsilon=payload.epsilon,
+                min_group_size=payload.min_group_size,
+                max_groups=payload.max_groups,
+                redact_dimension_keys=payload.redact_dimension_keys,
+                noise_seed=payload.noise_seed,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_privacy_analytics_policy_response(policy)
+
+    def _get_privacy_analytics_policy(tenant_id: str, request: Request) -> PrivacyAnalyticsPolicyResponse:
+        effective_tenant = _resolve_effective_tenant(request, tenant_id)
+        try:
+            policy = privacy_analytics.get_policy(tenant_id=effective_tenant)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if policy is None:
+            raise HTTPException(status_code=404, detail="privacy analytics policy not found")
+        return _to_privacy_analytics_policy_response(policy)
+
+    def _list_privacy_analytics_policies(limit: int) -> PrivacyAnalyticsPolicyListResponse:
+        items = [
+            _to_privacy_analytics_policy_response(item)
+            for item in privacy_analytics.list_policies(limit=limit)
+        ]
+        return PrivacyAnalyticsPolicyListResponse(items=items, total=len(items))
+
+    def _ingest_privacy_analytics_event(
+        payload: PrivacyAnalyticsEventIngestRequest,
+        request: Request,
+    ) -> PrivacyAnalyticsEventResponse:
+        effective_tenant = _resolve_effective_tenant(request, payload.tenant_id)
+        try:
+            event = privacy_analytics.ingest_event(
+                tenant_id=effective_tenant,
+                metric_name=payload.metric_name,
+                value=payload.value,
+                dimensions=payload.dimensions,
+                observed_at=payload.observed_at,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_privacy_analytics_event_response(event)
+
+    def _generate_privacy_analytics_report(
+        payload: PrivacyAnalyticsReportGenerateRequest,
+        request: Request,
+    ) -> PrivacyAnalyticsReportResponse:
+        effective_tenant = _resolve_effective_tenant(request, payload.tenant_id)
+        try:
+            report = privacy_analytics.generate_report(
+                tenant_id=effective_tenant,
+                metric_name=payload.metric_name,
+                start_time=payload.start_time,
+                end_time=payload.end_time,
+                group_by=payload.group_by,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_privacy_analytics_report_response(report)
+
+    def _list_privacy_analytics_reports(
+        request: Request,
+        limit: int,
+    ) -> PrivacyAnalyticsReportListResponse:
+        try:
+            reports = privacy_analytics.list_reports(
+                tenant_id=_tenant_id(request),
+                limit=limit,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_privacy_analytics_report_response(item) for item in reports]
+        return PrivacyAnalyticsReportListResponse(items=items, total=len(items))
+
+    def _get_privacy_analytics_report(
+        report_id: str,
+        request: Request,
+    ) -> PrivacyAnalyticsReportResponse:
+        try:
+            report = privacy_analytics.get_report(
+                report_id=report_id,
+                tenant_id=_tenant_id(request),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if report is None:
+            raise HTTPException(status_code=404, detail="privacy analytics report not found")
+        return _to_privacy_analytics_report_response(report)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -7263,6 +7548,255 @@ def create_app() -> FastAPI:
     ) -> PolicyVerificationReportResponse:
         _set_deprecation_headers(response)
         return _get_policy_verification_report(report_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/analytics/privacy/policies/{{tenant_id}}",
+        response_model=PrivacyAnalyticsPolicyResponse,
+    )
+    def upsert_privacy_analytics_policy_v1(
+        tenant_id: str,
+        payload: PrivacyAnalyticsPolicyUpsertRequest,
+        request: Request,
+    ) -> PrivacyAnalyticsPolicyResponse:
+        policy = _upsert_privacy_analytics_policy(tenant_id, payload, request)
+        _append_audit_event(
+            request,
+            action="privacy.analytics.policy.upsert",
+            resource_type="privacy_analytics_policy",
+            resource_id=policy.tenant_id,
+            details={
+                "epsilon": policy.epsilon,
+                "min_group_size": policy.min_group_size,
+                "max_groups": policy.max_groups,
+            },
+        )
+        return policy
+
+    @app.post(
+        "/analytics/privacy/policies/{tenant_id}",
+        response_model=PrivacyAnalyticsPolicyResponse,
+        deprecated=True,
+    )
+    def upsert_privacy_analytics_policy_legacy(
+        tenant_id: str,
+        payload: PrivacyAnalyticsPolicyUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> PrivacyAnalyticsPolicyResponse:
+        _set_deprecation_headers(response)
+        policy = _upsert_privacy_analytics_policy(tenant_id, payload, request)
+        _append_audit_event(
+            request,
+            action="privacy.analytics.policy.upsert",
+            resource_type="privacy_analytics_policy",
+            resource_id=policy.tenant_id,
+            details={
+                "epsilon": policy.epsilon,
+                "min_group_size": policy.min_group_size,
+                "max_groups": policy.max_groups,
+            },
+        )
+        return policy
+
+    @app.get(
+        f"{API_V1_PREFIX}/analytics/privacy/policies/{{tenant_id}}",
+        response_model=PrivacyAnalyticsPolicyResponse,
+    )
+    def get_privacy_analytics_policy_v1(
+        tenant_id: str,
+        request: Request,
+    ) -> PrivacyAnalyticsPolicyResponse:
+        return _get_privacy_analytics_policy(tenant_id, request)
+
+    @app.get(
+        "/analytics/privacy/policies/{tenant_id}",
+        response_model=PrivacyAnalyticsPolicyResponse,
+        deprecated=True,
+    )
+    def get_privacy_analytics_policy_legacy(
+        tenant_id: str,
+        response: Response,
+        request: Request,
+    ) -> PrivacyAnalyticsPolicyResponse:
+        _set_deprecation_headers(response)
+        return _get_privacy_analytics_policy(tenant_id, request)
+
+    @app.get(
+        f"{API_V1_PREFIX}/analytics/privacy/policies",
+        response_model=PrivacyAnalyticsPolicyListResponse,
+    )
+    def list_privacy_analytics_policies_v1(
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> PrivacyAnalyticsPolicyListResponse:
+        return _list_privacy_analytics_policies(limit)
+
+    @app.get(
+        "/analytics/privacy/policies",
+        response_model=PrivacyAnalyticsPolicyListResponse,
+        deprecated=True,
+    )
+    def list_privacy_analytics_policies_legacy(
+        response: Response,
+        limit: int = Query(default=200, ge=1, le=1000),
+    ) -> PrivacyAnalyticsPolicyListResponse:
+        _set_deprecation_headers(response)
+        return _list_privacy_analytics_policies(limit)
+
+    @app.post(
+        f"{API_V1_PREFIX}/analytics/privacy/events",
+        response_model=PrivacyAnalyticsEventResponse,
+    )
+    def ingest_privacy_analytics_event_v1(
+        payload: PrivacyAnalyticsEventIngestRequest,
+        request: Request,
+    ) -> PrivacyAnalyticsEventResponse:
+        event = _ingest_privacy_analytics_event(payload, request)
+        _record_usage_metering(tenant_id=event.tenant_id, dimension="privacy_analytics_ingest", units=1.0)
+        _append_audit_event(
+            request,
+            action="privacy.analytics.event.ingest",
+            resource_type="privacy_analytics_event",
+            resource_id=event.event_id,
+            details={"metric_name": event.metric_name, "value": event.value},
+        )
+        return event
+
+    @app.post(
+        "/analytics/privacy/events",
+        response_model=PrivacyAnalyticsEventResponse,
+        deprecated=True,
+    )
+    def ingest_privacy_analytics_event_legacy(
+        payload: PrivacyAnalyticsEventIngestRequest,
+        response: Response,
+        request: Request,
+    ) -> PrivacyAnalyticsEventResponse:
+        _set_deprecation_headers(response)
+        event = _ingest_privacy_analytics_event(payload, request)
+        _record_usage_metering(tenant_id=event.tenant_id, dimension="privacy_analytics_ingest", units=1.0)
+        _append_audit_event(
+            request,
+            action="privacy.analytics.event.ingest",
+            resource_type="privacy_analytics_event",
+            resource_id=event.event_id,
+            details={"metric_name": event.metric_name, "value": event.value},
+        )
+        return event
+
+    @app.post(
+        f"{API_V1_PREFIX}/analytics/privacy/reports/generate",
+        response_model=PrivacyAnalyticsReportResponse,
+    )
+    def generate_privacy_analytics_report_v1(
+        payload: PrivacyAnalyticsReportGenerateRequest,
+        request: Request,
+    ) -> PrivacyAnalyticsReportResponse:
+        report = _generate_privacy_analytics_report(payload, request)
+        _record_usage_metering(tenant_id=report.tenant_id, dimension="privacy_analytics_report_generate", units=1.0)
+        _append_audit_event(
+            request,
+            action="privacy.analytics.report.generate",
+            resource_type="privacy_analytics_report",
+            resource_id=report.report_id,
+            details={
+                "metric_name": report.metric_name,
+                "visible_groups": report.visible_groups,
+                "suppressed_groups": report.suppressed_groups,
+            },
+        )
+        _publish_realtime_event(
+            event_type="privacy.analytics.report.generated",
+            tenant_id=report.tenant_id,
+            payload={
+                "report_id": report.report_id,
+                "metric_name": report.metric_name,
+                "visible_groups": report.visible_groups,
+                "suppressed_groups": report.suppressed_groups,
+            },
+        )
+        return report
+
+    @app.post(
+        "/analytics/privacy/reports/generate",
+        response_model=PrivacyAnalyticsReportResponse,
+        deprecated=True,
+    )
+    def generate_privacy_analytics_report_legacy(
+        payload: PrivacyAnalyticsReportGenerateRequest,
+        response: Response,
+        request: Request,
+    ) -> PrivacyAnalyticsReportResponse:
+        _set_deprecation_headers(response)
+        report = _generate_privacy_analytics_report(payload, request)
+        _record_usage_metering(tenant_id=report.tenant_id, dimension="privacy_analytics_report_generate", units=1.0)
+        _append_audit_event(
+            request,
+            action="privacy.analytics.report.generate",
+            resource_type="privacy_analytics_report",
+            resource_id=report.report_id,
+            details={
+                "metric_name": report.metric_name,
+                "visible_groups": report.visible_groups,
+                "suppressed_groups": report.suppressed_groups,
+            },
+        )
+        _publish_realtime_event(
+            event_type="privacy.analytics.report.generated",
+            tenant_id=report.tenant_id,
+            payload={
+                "report_id": report.report_id,
+                "metric_name": report.metric_name,
+                "visible_groups": report.visible_groups,
+                "suppressed_groups": report.suppressed_groups,
+            },
+        )
+        return report
+
+    @app.get(
+        f"{API_V1_PREFIX}/analytics/privacy/reports",
+        response_model=PrivacyAnalyticsReportListResponse,
+    )
+    def list_privacy_analytics_reports_v1(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> PrivacyAnalyticsReportListResponse:
+        return _list_privacy_analytics_reports(request, limit)
+
+    @app.get(
+        "/analytics/privacy/reports",
+        response_model=PrivacyAnalyticsReportListResponse,
+        deprecated=True,
+    )
+    def list_privacy_analytics_reports_legacy(
+        response: Response,
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> PrivacyAnalyticsReportListResponse:
+        _set_deprecation_headers(response)
+        return _list_privacy_analytics_reports(request, limit)
+
+    @app.get(
+        f"{API_V1_PREFIX}/analytics/privacy/reports/{{report_id}}",
+        response_model=PrivacyAnalyticsReportResponse,
+    )
+    def get_privacy_analytics_report_v1(
+        report_id: str,
+        request: Request,
+    ) -> PrivacyAnalyticsReportResponse:
+        return _get_privacy_analytics_report(report_id, request)
+
+    @app.get(
+        "/analytics/privacy/reports/{report_id}",
+        response_model=PrivacyAnalyticsReportResponse,
+        deprecated=True,
+    )
+    def get_privacy_analytics_report_legacy(
+        report_id: str,
+        response: Response,
+        request: Request,
+    ) -> PrivacyAnalyticsReportResponse:
+        _set_deprecation_headers(response)
+        return _get_privacy_analytics_report(report_id, request)
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:

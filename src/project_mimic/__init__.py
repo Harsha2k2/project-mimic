@@ -100,6 +100,11 @@ from .policy_verification import (
     JsonFilePolicyVerificationStore,
     PolicyVerificationService,
 )
+from .privacy_analytics import (
+    InMemoryPrivacyAnalyticsStore,
+    JsonFilePrivacyAnalyticsStore,
+    PrivacyPreservingAnalyticsService,
+)
 from .predictive_autoscaling import (
     InMemoryPredictiveAutoscalingStore,
     JsonFilePredictiveAutoscalingStore,
@@ -228,6 +233,9 @@ __all__ = [
     "InMemoryPolicyVerificationStore",
     "JsonFilePolicyVerificationStore",
     "PolicyVerificationService",
+    "InMemoryPrivacyAnalyticsStore",
+    "JsonFilePrivacyAnalyticsStore",
+    "PrivacyPreservingAnalyticsService",
     "InMemoryPredictiveAutoscalingStore",
     "JsonFilePredictiveAutoscalingStore",
     "PredictiveAutoscalingService",
