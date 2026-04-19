@@ -52,6 +52,11 @@ from .site_pack_registry import InMemorySitePackRegistryStore, JsonFileSitePackR
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
 from .policy_explorer import InMemoryPolicyDecisionStore, JsonFilePolicyDecisionStore, PolicyDecisionExplorer
+from .predictive_autoscaling import (
+    InMemoryPredictiveAutoscalingStore,
+    JsonFilePredictiveAutoscalingStore,
+    PredictiveAutoscalingService,
+)
 from .queue_runtime import ActionJob, InMemoryActionQueue, JsonFileQueueStore
 from .review_queue import HumanReviewQueue, InMemoryReviewQueueStore, JsonFileReviewQueueStore
 from .regional_failover import (
@@ -743,6 +748,94 @@ class CostAwareScheduleDecisionResponse(APIPayloadModel):
     rationale: dict[str, float | int]
 
 
+class PredictiveAutoscalingPolicyUpsertRequest(APIPayloadModel):
+    resource_type: str
+    resource_id: str
+    min_replicas: int = Field(ge=1)
+    max_replicas: int = Field(ge=1)
+    scale_up_step: int = Field(default=1, ge=1)
+    scale_down_step: int = Field(default=1, ge=1)
+    queue_depth_target: float = Field(gt=0.0)
+    latency_ms_target: float = Field(gt=0.0)
+    lookback_window: int = Field(default=6, ge=2)
+    cooldown_seconds: int = Field(default=0, ge=0)
+
+
+class PredictiveAutoscalingPolicyResponse(APIPayloadModel):
+    policy_id: str
+    tenant_id: str
+    resource_type: str
+    resource_id: str
+    min_replicas: int
+    max_replicas: int
+    scale_up_step: int
+    scale_down_step: int
+    queue_depth_target: float
+    latency_ms_target: float
+    lookback_window: int
+    cooldown_seconds: int
+    last_recommendation_at: float | None = None
+    last_direction: str | None = None
+    last_desired_replicas: int | None = None
+    updated_at: float
+
+
+class PredictiveAutoscalingPolicyListResponse(APIPayloadModel):
+    items: list[PredictiveAutoscalingPolicyResponse]
+    total: int
+
+
+class PredictiveAutoscalingSignalRequest(APIPayloadModel):
+    policy_id: str
+    queue_depth: float = Field(ge=0.0)
+    latency_ms: float = Field(ge=0.0)
+    observed_at: float | None = Field(default=None, ge=0.0)
+    tenant_id: str | None = None
+
+
+class PredictiveAutoscalingSignalResponse(APIPayloadModel):
+    policy_id: str
+    tenant_id: str
+    resource_type: str
+    resource_id: str
+    sample_count: int
+    recent_sample_count: int
+    queue_recent_mean: float
+    latency_recent_mean: float
+    queue_trend: float
+    latency_trend: float
+    last_observed_at: float | None = None
+    last_direction: str | None = None
+    last_desired_replicas: int | None = None
+    updated_at: float
+
+
+class PredictiveAutoscalingRecommendRequest(APIPayloadModel):
+    policy_id: str
+    current_replicas: int = Field(ge=0)
+    tenant_id: str | None = None
+
+
+class PredictiveAutoscalingRecommendationResponse(APIPayloadModel):
+    policy_id: str
+    tenant_id: str
+    resource_type: str
+    resource_id: str
+    direction: str
+    current_replicas: int
+    bounded_current_replicas: int
+    desired_replicas: int
+    min_replicas: int
+    max_replicas: int
+    queue_pressure: float
+    latency_pressure: float
+    queue_trend: float
+    latency_trend: float
+    confidence: float
+    reason: str
+    evaluated_at: float
+
+
 class GovernancePolicyUpsertRequest(APIPayloadModel):
     consent_required: bool = False
     allowed_target_patterns: list[str] = Field(default_factory=list)
@@ -956,6 +1049,8 @@ def create_app() -> FastAPI:
     usage_metering_file_path = os.getenv("USAGE_METERING_FILE_PATH", "")
     cost_aware_scheduler_store_type = os.getenv("COST_AWARE_SCHEDULER_STORE", "memory").strip().lower()
     cost_aware_scheduler_file_path = os.getenv("COST_AWARE_SCHEDULER_FILE_PATH", "")
+    predictive_autoscaling_store_type = os.getenv("PREDICTIVE_AUTOSCALING_STORE", "memory").strip().lower()
+    predictive_autoscaling_file_path = os.getenv("PREDICTIVE_AUTOSCALING_FILE_PATH", "")
     billing_store_type = os.getenv("BILLING_STORE", "memory").strip().lower()
     billing_file_path = os.getenv("BILLING_FILE_PATH", "")
     billing_enforcement_enabled = os.getenv("BILLING_ENFORCEMENT_ENABLED", "false").strip().lower() in {
@@ -1146,6 +1241,15 @@ def create_app() -> FastAPI:
     else:
         cost_aware_scheduler_store = InMemoryCostAwareSchedulerStore()
 
+    if predictive_autoscaling_store_type == "file":
+        if not predictive_autoscaling_file_path:
+            raise RuntimeError(
+                "PREDICTIVE_AUTOSCALING_FILE_PATH is required when PREDICTIVE_AUTOSCALING_STORE=file"
+            )
+        predictive_autoscaling_store = JsonFilePredictiveAutoscalingStore(predictive_autoscaling_file_path)
+    else:
+        predictive_autoscaling_store = InMemoryPredictiveAutoscalingStore()
+
     if billing_store_type == "file":
         if not billing_file_path:
             raise RuntimeError("BILLING_FILE_PATH is required when BILLING_STORE=file")
@@ -1214,6 +1318,7 @@ def create_app() -> FastAPI:
     feature_flags = FeatureFlagService(store=feature_flag_store)
     usage_metering = TenantUsageMetering(store=usage_metering_store)
     cost_aware_scheduler = CostAwareScheduler(store=cost_aware_scheduler_store)
+    predictive_autoscaling = PredictiveAutoscalingService(store=predictive_autoscaling_store)
     billing = BillingPrimitives(store=billing_store)
     data_residency = TenantDataResidencyPolicyService(store=data_residency_store)
     multi_region_control_plane = MultiRegionControlPlaneService(store=multi_region_control_plane_store)
@@ -1307,6 +1412,14 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/scheduler/cost-aware/route") or path.startswith("/scheduler/cost-aware/route"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/scheduler/cost-aware") or path.startswith("/scheduler/cost-aware"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/autoscaling/predictive/recommend") or path.startswith("/autoscaling/predictive/recommend"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/autoscaling/predictive/signals") or path.startswith("/autoscaling/predictive/signals"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/autoscaling/predictive/status") or path.startswith("/autoscaling/predictive/status"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/autoscaling/predictive") or path.startswith("/autoscaling/predictive"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -1580,6 +1693,179 @@ def create_app() -> FastAPI:
             routed_at=float(scheduled.get("routed_at", time.time())),
             rationale=rationale,
         )
+
+    def _to_predictive_autoscaling_policy_response(payload: dict[str, Any]) -> PredictiveAutoscalingPolicyResponse:
+        last_recommendation_at_raw = payload.get("last_recommendation_at")
+        last_direction_raw = payload.get("last_direction")
+        last_desired_replicas_raw = payload.get("last_desired_replicas")
+        return PredictiveAutoscalingPolicyResponse(
+            policy_id=str(payload.get("policy_id", "")),
+            tenant_id=str(payload.get("tenant_id", "")),
+            resource_type=str(payload.get("resource_type", "")),
+            resource_id=str(payload.get("resource_id", "")),
+            min_replicas=int(payload.get("min_replicas", 0)),
+            max_replicas=int(payload.get("max_replicas", 0)),
+            scale_up_step=int(payload.get("scale_up_step", 1)),
+            scale_down_step=int(payload.get("scale_down_step", 1)),
+            queue_depth_target=float(payload.get("queue_depth_target", 0.0)),
+            latency_ms_target=float(payload.get("latency_ms_target", 0.0)),
+            lookback_window=int(payload.get("lookback_window", 0)),
+            cooldown_seconds=int(payload.get("cooldown_seconds", 0)),
+            last_recommendation_at=(
+                None
+                if last_recommendation_at_raw is None
+                else float(last_recommendation_at_raw)
+            ),
+            last_direction=(
+                None
+                if last_direction_raw is None
+                else str(last_direction_raw)
+            ),
+            last_desired_replicas=(
+                None
+                if last_desired_replicas_raw is None
+                else int(last_desired_replicas_raw)
+            ),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_predictive_autoscaling_signal_response(payload: dict[str, Any]) -> PredictiveAutoscalingSignalResponse:
+        last_observed_at_raw = payload.get("last_observed_at")
+        last_direction_raw = payload.get("last_direction")
+        last_desired_replicas_raw = payload.get("last_desired_replicas")
+        return PredictiveAutoscalingSignalResponse(
+            policy_id=str(payload.get("policy_id", "")),
+            tenant_id=str(payload.get("tenant_id", "")),
+            resource_type=str(payload.get("resource_type", "")),
+            resource_id=str(payload.get("resource_id", "")),
+            sample_count=int(payload.get("sample_count", 0)),
+            recent_sample_count=int(payload.get("recent_sample_count", 0)),
+            queue_recent_mean=float(payload.get("queue_recent_mean", 0.0)),
+            latency_recent_mean=float(payload.get("latency_recent_mean", 0.0)),
+            queue_trend=float(payload.get("queue_trend", 0.0)),
+            latency_trend=float(payload.get("latency_trend", 0.0)),
+            last_observed_at=(
+                None
+                if last_observed_at_raw is None
+                else float(last_observed_at_raw)
+            ),
+            last_direction=(
+                None
+                if last_direction_raw is None
+                else str(last_direction_raw)
+            ),
+            last_desired_replicas=(
+                None
+                if last_desired_replicas_raw is None
+                else int(last_desired_replicas_raw)
+            ),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_predictive_autoscaling_recommendation_response(
+        payload: dict[str, Any],
+    ) -> PredictiveAutoscalingRecommendationResponse:
+        return PredictiveAutoscalingRecommendationResponse(
+            policy_id=str(payload.get("policy_id", "")),
+            tenant_id=str(payload.get("tenant_id", "")),
+            resource_type=str(payload.get("resource_type", "")),
+            resource_id=str(payload.get("resource_id", "")),
+            direction=str(payload.get("direction", "hold")),
+            current_replicas=int(payload.get("current_replicas", 0)),
+            bounded_current_replicas=int(payload.get("bounded_current_replicas", 0)),
+            desired_replicas=int(payload.get("desired_replicas", 0)),
+            min_replicas=int(payload.get("min_replicas", 0)),
+            max_replicas=int(payload.get("max_replicas", 0)),
+            queue_pressure=float(payload.get("queue_pressure", 0.0)),
+            latency_pressure=float(payload.get("latency_pressure", 0.0)),
+            queue_trend=float(payload.get("queue_trend", 0.0)),
+            latency_trend=float(payload.get("latency_trend", 0.0)),
+            confidence=float(payload.get("confidence", 0.0)),
+            reason=str(payload.get("reason", "")),
+            evaluated_at=float(payload.get("evaluated_at", 0.0)),
+        )
+
+    def _resolve_effective_tenant(request: Request, tenant_override: str | None) -> str:
+        caller_tenant = _tenant_id(request)
+        requested_tenant = tenant_override.strip() if tenant_override is not None else ""
+        if requested_tenant and requested_tenant != caller_tenant:
+            raise HTTPException(status_code=403, detail="tenant override does not match caller scope")
+        return requested_tenant or caller_tenant
+
+    def _upsert_predictive_autoscaling_policy(
+        policy_id: str,
+        payload: PredictiveAutoscalingPolicyUpsertRequest,
+        request: Request,
+    ) -> PredictiveAutoscalingPolicyResponse:
+        effective_tenant = _tenant_id(request)
+        try:
+            policy = predictive_autoscaling.upsert_policy(
+                policy_id=policy_id,
+                tenant_id=effective_tenant,
+                resource_type=payload.resource_type,
+                resource_id=payload.resource_id,
+                min_replicas=payload.min_replicas,
+                max_replicas=payload.max_replicas,
+                scale_up_step=payload.scale_up_step,
+                scale_down_step=payload.scale_down_step,
+                queue_depth_target=payload.queue_depth_target,
+                latency_ms_target=payload.latency_ms_target,
+                lookback_window=payload.lookback_window,
+                cooldown_seconds=payload.cooldown_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_predictive_autoscaling_policy_response(policy)
+
+    def _list_predictive_autoscaling_policies(request: Request) -> PredictiveAutoscalingPolicyListResponse:
+        effective_tenant = _tenant_id(request)
+        items = [
+            _to_predictive_autoscaling_policy_response(item)
+            for item in predictive_autoscaling.list_policies(tenant_id=effective_tenant)
+        ]
+        return PredictiveAutoscalingPolicyListResponse(items=items, total=len(items))
+
+    def _ingest_predictive_autoscaling_signal(
+        payload: PredictiveAutoscalingSignalRequest,
+        request: Request,
+    ) -> PredictiveAutoscalingSignalResponse:
+        effective_tenant = _resolve_effective_tenant(request, payload.tenant_id)
+        try:
+            signal = predictive_autoscaling.ingest_signal(
+                policy_id=payload.policy_id,
+                tenant_id=effective_tenant,
+                queue_depth=payload.queue_depth,
+                latency_ms=payload.latency_ms,
+                observed_at=payload.observed_at,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_predictive_autoscaling_signal_response(signal)
+
+    def _predictive_autoscaling_status(policy_id: str, request: Request) -> PredictiveAutoscalingSignalResponse:
+        effective_tenant = _tenant_id(request)
+        try:
+            status = predictive_autoscaling.status(policy_id=policy_id, tenant_id=effective_tenant)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if status is None:
+            raise HTTPException(status_code=404, detail="predictive autoscaling policy not found")
+        return _to_predictive_autoscaling_signal_response(status)
+
+    def _recommend_predictive_autoscaling(
+        payload: PredictiveAutoscalingRecommendRequest,
+        request: Request,
+    ) -> PredictiveAutoscalingRecommendationResponse:
+        effective_tenant = _resolve_effective_tenant(request, payload.tenant_id)
+        try:
+            recommendation = predictive_autoscaling.recommend(
+                policy_id=payload.policy_id,
+                tenant_id=effective_tenant,
+                current_replicas=payload.current_replicas,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_predictive_autoscaling_recommendation_response(recommendation)
 
     def _to_async_job_response(job: ActionJob) -> AsyncJobResponse:
         return AsyncJobResponse(
@@ -5240,6 +5526,231 @@ def create_app() -> FastAPI:
             details={"objective": decision.objective, "resource": decision.selected_resource},
         )
         return decision
+
+    @app.post(
+        f"{API_V1_PREFIX}/autoscaling/predictive/policies/{{policy_id}}",
+        response_model=PredictiveAutoscalingPolicyResponse,
+    )
+    def upsert_predictive_autoscaling_policy_v1(
+        policy_id: str,
+        payload: PredictiveAutoscalingPolicyUpsertRequest,
+        request: Request,
+    ) -> PredictiveAutoscalingPolicyResponse:
+        policy = _upsert_predictive_autoscaling_policy(policy_id, payload, request)
+        _append_audit_event(
+            request,
+            action="autoscaling.predictive.policy.upsert",
+            resource_type="predictive_autoscaling_policy",
+            resource_id=policy.policy_id,
+            details={
+                "resource_type": policy.resource_type,
+                "resource_id": policy.resource_id,
+                "min_replicas": policy.min_replicas,
+                "max_replicas": policy.max_replicas,
+            },
+        )
+        return policy
+
+    @app.post(
+        "/autoscaling/predictive/policies/{policy_id}",
+        response_model=PredictiveAutoscalingPolicyResponse,
+        deprecated=True,
+    )
+    def upsert_predictive_autoscaling_policy_legacy(
+        policy_id: str,
+        payload: PredictiveAutoscalingPolicyUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> PredictiveAutoscalingPolicyResponse:
+        _set_deprecation_headers(response)
+        policy = _upsert_predictive_autoscaling_policy(policy_id, payload, request)
+        _append_audit_event(
+            request,
+            action="autoscaling.predictive.policy.upsert",
+            resource_type="predictive_autoscaling_policy",
+            resource_id=policy.policy_id,
+            details={
+                "resource_type": policy.resource_type,
+                "resource_id": policy.resource_id,
+                "min_replicas": policy.min_replicas,
+                "max_replicas": policy.max_replicas,
+            },
+        )
+        return policy
+
+    @app.get(
+        f"{API_V1_PREFIX}/autoscaling/predictive/policies",
+        response_model=PredictiveAutoscalingPolicyListResponse,
+    )
+    def list_predictive_autoscaling_policies_v1(request: Request) -> PredictiveAutoscalingPolicyListResponse:
+        return _list_predictive_autoscaling_policies(request)
+
+    @app.get(
+        "/autoscaling/predictive/policies",
+        response_model=PredictiveAutoscalingPolicyListResponse,
+        deprecated=True,
+    )
+    def list_predictive_autoscaling_policies_legacy(
+        response: Response,
+        request: Request,
+    ) -> PredictiveAutoscalingPolicyListResponse:
+        _set_deprecation_headers(response)
+        return _list_predictive_autoscaling_policies(request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/autoscaling/predictive/signals",
+        response_model=PredictiveAutoscalingSignalResponse,
+    )
+    def ingest_predictive_autoscaling_signal_v1(
+        payload: PredictiveAutoscalingSignalRequest,
+        request: Request,
+    ) -> PredictiveAutoscalingSignalResponse:
+        signal = _ingest_predictive_autoscaling_signal(payload, request)
+        _record_usage_metering(tenant_id=signal.tenant_id, dimension="predictive_autoscaling_signal", units=1.0)
+        _append_audit_event(
+            request,
+            action="autoscaling.predictive.signal.ingest",
+            resource_type="predictive_autoscaling_policy",
+            resource_id=signal.policy_id,
+            details={
+                "queue_recent_mean": signal.queue_recent_mean,
+                "latency_recent_mean": signal.latency_recent_mean,
+                "sample_count": signal.sample_count,
+            },
+        )
+        return signal
+
+    @app.post(
+        "/autoscaling/predictive/signals",
+        response_model=PredictiveAutoscalingSignalResponse,
+        deprecated=True,
+    )
+    def ingest_predictive_autoscaling_signal_legacy(
+        payload: PredictiveAutoscalingSignalRequest,
+        response: Response,
+        request: Request,
+    ) -> PredictiveAutoscalingSignalResponse:
+        _set_deprecation_headers(response)
+        signal = _ingest_predictive_autoscaling_signal(payload, request)
+        _record_usage_metering(tenant_id=signal.tenant_id, dimension="predictive_autoscaling_signal", units=1.0)
+        _append_audit_event(
+            request,
+            action="autoscaling.predictive.signal.ingest",
+            resource_type="predictive_autoscaling_policy",
+            resource_id=signal.policy_id,
+            details={
+                "queue_recent_mean": signal.queue_recent_mean,
+                "latency_recent_mean": signal.latency_recent_mean,
+                "sample_count": signal.sample_count,
+            },
+        )
+        return signal
+
+    @app.get(
+        f"{API_V1_PREFIX}/autoscaling/predictive/status/{{policy_id}}",
+        response_model=PredictiveAutoscalingSignalResponse,
+    )
+    def predictive_autoscaling_status_v1(
+        policy_id: str,
+        request: Request,
+    ) -> PredictiveAutoscalingSignalResponse:
+        return _predictive_autoscaling_status(policy_id, request)
+
+    @app.get(
+        "/autoscaling/predictive/status/{policy_id}",
+        response_model=PredictiveAutoscalingSignalResponse,
+        deprecated=True,
+    )
+    def predictive_autoscaling_status_legacy(
+        policy_id: str,
+        response: Response,
+        request: Request,
+    ) -> PredictiveAutoscalingSignalResponse:
+        _set_deprecation_headers(response)
+        return _predictive_autoscaling_status(policy_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/autoscaling/predictive/recommend",
+        response_model=PredictiveAutoscalingRecommendationResponse,
+    )
+    def recommend_predictive_autoscaling_v1(
+        payload: PredictiveAutoscalingRecommendRequest,
+        request: Request,
+    ) -> PredictiveAutoscalingRecommendationResponse:
+        recommendation = _recommend_predictive_autoscaling(payload, request)
+        _record_usage_metering(
+            tenant_id=recommendation.tenant_id,
+            dimension="predictive_autoscaling_recommend",
+            units=1.0,
+        )
+        _append_audit_event(
+            request,
+            action="autoscaling.predictive.recommend",
+            resource_type="predictive_autoscaling_policy",
+            resource_id=recommendation.policy_id,
+            details={
+                "direction": recommendation.direction,
+                "desired_replicas": recommendation.desired_replicas,
+                "reason": recommendation.reason,
+            },
+        )
+        if recommendation.direction != "hold":
+            _publish_realtime_event(
+                event_type="autoscaling.predictive.recommendation",
+                tenant_id=recommendation.tenant_id,
+                payload={
+                    "policy_id": recommendation.policy_id,
+                    "resource_type": recommendation.resource_type,
+                    "resource_id": recommendation.resource_id,
+                    "direction": recommendation.direction,
+                    "desired_replicas": recommendation.desired_replicas,
+                    "reason": recommendation.reason,
+                },
+            )
+        return recommendation
+
+    @app.post(
+        "/autoscaling/predictive/recommend",
+        response_model=PredictiveAutoscalingRecommendationResponse,
+        deprecated=True,
+    )
+    def recommend_predictive_autoscaling_legacy(
+        payload: PredictiveAutoscalingRecommendRequest,
+        response: Response,
+        request: Request,
+    ) -> PredictiveAutoscalingRecommendationResponse:
+        _set_deprecation_headers(response)
+        recommendation = _recommend_predictive_autoscaling(payload, request)
+        _record_usage_metering(
+            tenant_id=recommendation.tenant_id,
+            dimension="predictive_autoscaling_recommend",
+            units=1.0,
+        )
+        _append_audit_event(
+            request,
+            action="autoscaling.predictive.recommend",
+            resource_type="predictive_autoscaling_policy",
+            resource_id=recommendation.policy_id,
+            details={
+                "direction": recommendation.direction,
+                "desired_replicas": recommendation.desired_replicas,
+                "reason": recommendation.reason,
+            },
+        )
+        if recommendation.direction != "hold":
+            _publish_realtime_event(
+                event_type="autoscaling.predictive.recommendation",
+                tenant_id=recommendation.tenant_id,
+                payload={
+                    "policy_id": recommendation.policy_id,
+                    "resource_type": recommendation.resource_type,
+                    "resource_id": recommendation.resource_id,
+                    "direction": recommendation.direction,
+                    "desired_replicas": recommendation.desired_replicas,
+                    "reason": recommendation.reason,
+                },
+            )
+        return recommendation
 
     @app.post(f"{API_V1_PREFIX}/governance/policies/{{tenant_id}}", response_model=GovernancePolicyResponse)
     def upsert_governance_policy_v1(

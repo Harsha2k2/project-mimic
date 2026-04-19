@@ -90,6 +90,11 @@ from .mimetic import (
 )
 from .observability import InMemoryMetrics, OpenTelemetryTracer, TraceSpan
 from .policy import PolicyContext, PolicyDecision, PolicyEngine
+from .predictive_autoscaling import (
+    InMemoryPredictiveAutoscalingStore,
+    JsonFilePredictiveAutoscalingStore,
+    PredictiveAutoscalingService,
+)
 from .queue_runtime import ActionJob, InMemoryActionQueue, JobStatus, WorkerLease
 from .queue_runtime import InMemoryQueueStore, JsonFileQueueStore, QueueStore
 from .regional_failover import (
@@ -207,6 +212,9 @@ __all__ = [
     "PolicyContext",
     "PolicyDecision",
     "PolicyEngine",
+    "InMemoryPredictiveAutoscalingStore",
+    "JsonFilePredictiveAutoscalingStore",
+    "PredictiveAutoscalingService",
     "PlanKeystrokesRequest",
     "PlanKeystrokesResponse",
     "PlanPointerRequest",
