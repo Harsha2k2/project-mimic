@@ -41,7 +41,7 @@ Execution rule for this backlog:
 26. [x] Build operator web console for sessions, traces, artifacts, and queue state.
 27. [x] Build CLI for operational workflows (restore, rollback, replay, quarantine).
 28. [x] Publish official SDKs (Python and TypeScript) for client integration.
-29. [ ] Add webhook/event subscription system for lifecycle events.
+29. [x] Add webhook/event subscription system for lifecycle events.
 30. [ ] Add async job API for long-running flows (submit, poll, cancel).
 31. [ ] Add event stream delivery (SSE or message bus) for realtime status.
 32. [ ] Add model registry with rollout channels (dev, canary, prod).

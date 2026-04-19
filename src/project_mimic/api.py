@@ -34,6 +34,11 @@ from .session_lifecycle import (
     SessionRegistry,
     SessionStatus,
 )
+from .webhooks import (
+    InMemoryWebhookSubscriptionStore,
+    JsonFileWebhookSubscriptionStore,
+    LifecycleEventWebhookPublisher,
+)
 from .vision.grounding import BBox, DOMNode, UIEntity
 
 
@@ -249,6 +254,29 @@ class AuditExportResponse(APIPayloadModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class WebhookSubscriptionCreateRequest(APIPayloadModel):
+    name: str
+    callback_url: str
+    events: list[str] = Field(default_factory=list)
+    secret: str | None = None
+
+
+class WebhookSubscriptionResponse(APIPayloadModel):
+    subscription_id: str
+    name: str
+    callback_url: str
+    events: list[str] = Field(default_factory=list)
+    tenant_id: str
+    active: bool
+    created_at: float
+    updated_at: float
+
+
+class WebhookSubscriptionListResponse(APIPayloadModel):
+    items: list[WebhookSubscriptionResponse]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -299,6 +327,9 @@ def create_app() -> FastAPI:
     audit_events: list[dict[str, Any]] = []
     metadata_store_type = os.getenv("SESSION_METADATA_STORE", "memory").strip().lower()
     metadata_store_file_path = os.getenv("SESSION_METADATA_FILE_PATH", "")
+    webhook_store_type = os.getenv("WEBHOOK_SUBSCRIPTION_STORE", "memory").strip().lower()
+    webhook_store_file_path = os.getenv("WEBHOOK_SUBSCRIPTION_FILE_PATH", "")
+    webhook_timeout_seconds = float(os.getenv("WEBHOOK_DELIVERY_TIMEOUT_SECONDS", "3"))
     operator_artifacts_file_path = os.getenv("OPERATOR_CONSOLE_ARTIFACTS_FILE_PATH", "")
     operator_queue_file_path = os.getenv("OPERATOR_CONSOLE_QUEUE_FILE_PATH", "")
 
@@ -398,10 +429,18 @@ def create_app() -> FastAPI:
     else:
         metadata_store = InMemorySessionMetadataStore()
 
+    if webhook_store_type == "file":
+        if not webhook_store_file_path:
+            raise RuntimeError("WEBHOOK_SUBSCRIPTION_FILE_PATH is required when WEBHOOK_SUBSCRIPTION_STORE=file")
+        webhook_store = JsonFileWebhookSubscriptionStore(webhook_store_file_path)
+    else:
+        webhook_store = InMemoryWebhookSubscriptionStore()
+
     registry = SessionRegistry(ttl_seconds=session_ttl_seconds, metadata_store=metadata_store)
     api_tracer = OpenTelemetryTracer(component="api")
     orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
     audit_sink = build_audit_export_sink_from_env()
+    webhook_publisher = LifecycleEventWebhookPublisher(store=webhook_store, timeout_seconds=webhook_timeout_seconds)
     engine = ExecutionEngine(orchestrator=DecisionOrchestrator(tracer=orchestrator_tracer))
     metrics = InMemoryMetrics()
     scavenger_stop = Event()
@@ -419,6 +458,8 @@ def create_app() -> FastAPI:
 
     def _required_role_for_request(method: str, path: str) -> str:
         if path.startswith(f"{API_V1_PREFIX}/operator") or path.startswith("/operator"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/events/subscriptions") or path.startswith("/events/subscriptions"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/auth/keys") or path.startswith("/auth/keys"):
             return "admin"
@@ -456,6 +497,36 @@ def create_app() -> FastAPI:
                 "resource_id": resource_id,
                 "details": details or {},
             }
+        )
+
+    def _emit_lifecycle_event(
+        request: Request,
+        *,
+        event_type: str,
+        session_id: str,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        payload = {
+            "session_id": session_id,
+            "request_id": getattr(request.state, "request_id", None),
+            "details": details or {},
+        }
+        try:
+            webhook_publisher.emit(event_type=event_type, tenant_id=_tenant_id(request), payload=payload)
+        except Exception:
+            # Lifecycle operations must remain available even if webhook delivery fails.
+            return
+
+    def _to_webhook_subscription_response(payload: dict[str, Any]) -> WebhookSubscriptionResponse:
+        return WebhookSubscriptionResponse(
+            subscription_id=str(payload.get("subscription_id", "")),
+            name=str(payload.get("name", "")),
+            callback_url=str(payload.get("callback_url", "")),
+            events=[str(item) for item in payload.get("events", []) if isinstance(item, str)],
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            active=bool(payload.get("active", True)),
+            created_at=float(payload.get("created_at", time.time())),
+            updated_at=float(payload.get("updated_at", time.time())),
         )
 
     def _load_optional_json_file(file_path: str) -> Any:
@@ -1117,6 +1188,12 @@ def create_app() -> FastAPI:
             goal=payload.goal,
             action_type="create",
         )
+        _emit_lifecycle_event(
+            request,
+            event_type="session.create",
+            session_id=response.session_id,
+            details={"goal": payload.goal},
+        )
         return response
 
     @app.post("/sessions", response_model=SessionCreatedResponse, deprecated=True)
@@ -1141,6 +1218,12 @@ def create_app() -> FastAPI:
             goal=payload.goal,
             action_type="create",
         )
+        _emit_lifecycle_event(
+            request,
+            event_type="session.create",
+            session_id=created.session_id,
+            details={"goal": payload.goal},
+        )
         return created
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/reset", response_model=Observation)
@@ -1151,6 +1234,12 @@ def create_app() -> FastAPI:
             action="session.reset",
             resource_type="session",
             resource_id=session_id,
+            details={"goal": payload.goal},
+        )
+        _emit_lifecycle_event(
+            request,
+            event_type="session.reset",
+            session_id=session_id,
             details={"goal": payload.goal},
         )
         return observation
@@ -1169,6 +1258,12 @@ def create_app() -> FastAPI:
             action="session.reset",
             resource_type="session",
             resource_id=session_id,
+            details={"goal": payload.goal},
+        )
+        _emit_lifecycle_event(
+            request,
+            event_type="session.reset",
+            session_id=session_id,
             details={"goal": payload.goal},
         )
         return observation
@@ -1190,6 +1285,12 @@ def create_app() -> FastAPI:
             trace_id=getattr(request.state, "request_id", None),
             goal=goal,
             action_type=action.action_type.value,
+        )
+        _emit_lifecycle_event(
+            request,
+            event_type="session.step",
+            session_id=session_id,
+            details={"action_type": action.action_type.value},
         )
         return response
 
@@ -1215,6 +1316,12 @@ def create_app() -> FastAPI:
             trace_id=getattr(request.state, "request_id", None),
             goal=step_response.observation.goal,
             action_type=action.action_type.value,
+        )
+        _emit_lifecycle_event(
+            request,
+            event_type="session.step",
+            session_id=session_id,
+            details={"action_type": action.action_type.value},
         )
         return step_response
 
@@ -1295,6 +1402,7 @@ def create_app() -> FastAPI:
             resource_type="session",
             resource_id=session_id,
         )
+        _emit_lifecycle_event(request, event_type="session.rollback", session_id=session_id)
         return payload
 
     @app.post("/sessions/{session_id}/rollback", deprecated=True)
@@ -1307,6 +1415,7 @@ def create_app() -> FastAPI:
             resource_type="session",
             resource_id=session_id,
         )
+        _emit_lifecycle_event(request, event_type="session.rollback", session_id=session_id)
         return payload
 
     @app.post(f"{API_V1_PREFIX}/sessions/{{session_id}}/resume")
@@ -1318,6 +1427,7 @@ def create_app() -> FastAPI:
             resource_type="session",
             resource_id=session_id,
         )
+        _emit_lifecycle_event(request, event_type="session.resume", session_id=session_id)
         return payload
 
     @app.post("/sessions/{session_id}/resume", deprecated=True)
@@ -1330,6 +1440,7 @@ def create_app() -> FastAPI:
             resource_type="session",
             resource_id=session_id,
         )
+        _emit_lifecycle_event(request, event_type="session.resume", session_id=session_id)
         return payload
 
     @app.get(f"{API_V1_PREFIX}/audit/logs", response_model=AuditLogListResponse)
@@ -1358,6 +1469,69 @@ def create_app() -> FastAPI:
     def export_audit_logs_legacy(response: Response) -> AuditExportResponse:
         _set_deprecation_headers(response)
         return _export_audit_events()
+
+    @app.post(f"{API_V1_PREFIX}/events/subscriptions", response_model=WebhookSubscriptionResponse)
+    def create_event_subscription_v1(
+        payload: WebhookSubscriptionCreateRequest,
+        request: Request,
+    ) -> WebhookSubscriptionResponse:
+        created = webhook_publisher.create_subscription(
+            name=payload.name,
+            callback_url=payload.callback_url,
+            events=payload.events,
+            tenant_id=_tenant_id(request),
+            secret=payload.secret,
+        )
+        response_model = _to_webhook_subscription_response(created)
+        _append_audit_event(
+            request,
+            action="event.subscription.create",
+            resource_type="webhook_subscription",
+            resource_id=response_model.subscription_id,
+            details={"name": response_model.name, "events": response_model.events},
+        )
+        return response_model
+
+    @app.post("/events/subscriptions", response_model=WebhookSubscriptionResponse, deprecated=True)
+    def create_event_subscription_legacy(
+        payload: WebhookSubscriptionCreateRequest,
+        response: Response,
+        request: Request,
+    ) -> WebhookSubscriptionResponse:
+        _set_deprecation_headers(response)
+        created = webhook_publisher.create_subscription(
+            name=payload.name,
+            callback_url=payload.callback_url,
+            events=payload.events,
+            tenant_id=_tenant_id(request),
+            secret=payload.secret,
+        )
+        response_model = _to_webhook_subscription_response(created)
+        _append_audit_event(
+            request,
+            action="event.subscription.create",
+            resource_type="webhook_subscription",
+            resource_id=response_model.subscription_id,
+            details={"name": response_model.name, "events": response_model.events},
+        )
+        return response_model
+
+    @app.get(f"{API_V1_PREFIX}/events/subscriptions", response_model=WebhookSubscriptionListResponse)
+    def list_event_subscriptions_v1(request: Request) -> WebhookSubscriptionListResponse:
+        items = [
+            _to_webhook_subscription_response(payload)
+            for payload in webhook_publisher.list_subscriptions(tenant_id=_tenant_id(request))
+        ]
+        return WebhookSubscriptionListResponse(items=items, total=len(items))
+
+    @app.get("/events/subscriptions", response_model=WebhookSubscriptionListResponse, deprecated=True)
+    def list_event_subscriptions_legacy(response: Response, request: Request) -> WebhookSubscriptionListResponse:
+        _set_deprecation_headers(response)
+        items = [
+            _to_webhook_subscription_response(payload)
+            for payload in webhook_publisher.list_subscriptions(tenant_id=_tenant_id(request))
+        ]
+        return WebhookSubscriptionListResponse(items=items, total=len(items))
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
