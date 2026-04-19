@@ -1,0 +1,23 @@
+name: runbook-automation
+
+on:
+  workflow_dispatch:
+    inputs:
+      incident_class:
+        description: "Incident class to render"
+        required: true
+
+jobs:
+  render-runbook:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Render runbook
+        run: python tools/incident/runbook_automation.py "${{ inputs.incident_class }}"
