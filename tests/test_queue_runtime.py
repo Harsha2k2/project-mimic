@@ -170,3 +170,25 @@ def test_quarantine_rejects_completed_job() -> None:
 
     with pytest.raises(ValueError, match="cannot quarantine completed job"):
         queue.quarantine(job.job_id, reason="manual triage")
+
+
+def test_cancel_moves_queued_job_to_canceled() -> None:
+    queue = InMemoryActionQueue()
+
+    job = queue.dispatch({"action": "click"}, idempotency_key="cancel-1")
+    canceled = queue.cancel(job.job_id, reason="operator canceled")
+
+    assert canceled.status == JobStatus.CANCELED
+    assert canceled.last_error == "operator canceled"
+    assert queue.queue_depth() == 0
+
+
+def test_cancel_rejects_terminal_job() -> None:
+    queue = InMemoryActionQueue()
+
+    job = queue.dispatch({"action": "click"}, idempotency_key="cancel-2")
+    queue.lease_next("worker-a")
+    queue.ack("worker-a", job.job_id)
+
+    with pytest.raises(ValueError, match="job is already terminal"):
+        queue.cancel(job.job_id, reason="operator canceled")

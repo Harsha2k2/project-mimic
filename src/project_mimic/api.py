@@ -23,6 +23,7 @@ from .audit_export import build_audit_export_sink_from_env
 from .engine import ExecutionEngine
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
+from .queue_runtime import ActionJob, InMemoryActionQueue, JsonFileQueueStore
 from .security import redact_sensitive_structure, redact_sensitive_text
 from .orchestrator.decision_orchestrator import DecisionOrchestrator
 from .session_lifecycle import (
@@ -277,6 +278,35 @@ class WebhookSubscriptionListResponse(APIPayloadModel):
     total: int
 
 
+class AsyncJobSubmitRequest(APIPayloadModel):
+    job_type: str
+    input: dict[str, Any] = Field(default_factory=dict)
+    idempotency_key: str | None = None
+
+
+class AsyncJobResponse(APIPayloadModel):
+    job_id: str
+    idempotency_key: str
+    status: str
+    action_payload: dict[str, Any] = Field(default_factory=dict)
+    attempts: int
+    max_attempts: int
+    created_at: float
+    updated_at: float
+    lease_worker_id: str | None = None
+    lease_expires_at: float | None = None
+    last_error: str | None = None
+
+
+class AsyncJobSubmitResponse(APIPayloadModel):
+    job: AsyncJobResponse
+
+
+class AsyncJobCancelResponse(APIPayloadModel):
+    canceled: bool
+    job: AsyncJobResponse
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -327,6 +357,9 @@ def create_app() -> FastAPI:
     audit_events: list[dict[str, Any]] = []
     metadata_store_type = os.getenv("SESSION_METADATA_STORE", "memory").strip().lower()
     metadata_store_file_path = os.getenv("SESSION_METADATA_FILE_PATH", "")
+    async_job_queue_store_type = os.getenv("ASYNC_JOB_QUEUE_STORE", "memory").strip().lower()
+    async_job_queue_file_path = os.getenv("ASYNC_JOB_QUEUE_FILE_PATH", "")
+    async_job_idempotency_ttl_seconds = int(os.getenv("ASYNC_JOB_IDEMPOTENCY_TTL_SECONDS", "3600"))
     webhook_store_type = os.getenv("WEBHOOK_SUBSCRIPTION_STORE", "memory").strip().lower()
     webhook_store_file_path = os.getenv("WEBHOOK_SUBSCRIPTION_FILE_PATH", "")
     webhook_timeout_seconds = float(os.getenv("WEBHOOK_DELIVERY_TIMEOUT_SECONDS", "3"))
@@ -429,6 +462,13 @@ def create_app() -> FastAPI:
     else:
         metadata_store = InMemorySessionMetadataStore()
 
+    if async_job_queue_store_type == "file":
+        if not async_job_queue_file_path:
+            raise RuntimeError("ASYNC_JOB_QUEUE_FILE_PATH is required when ASYNC_JOB_QUEUE_STORE=file")
+        async_job_queue_store = JsonFileQueueStore(async_job_queue_file_path)
+    else:
+        async_job_queue_store = None
+
     if webhook_store_type == "file":
         if not webhook_store_file_path:
             raise RuntimeError("WEBHOOK_SUBSCRIPTION_FILE_PATH is required when WEBHOOK_SUBSCRIPTION_STORE=file")
@@ -437,6 +477,10 @@ def create_app() -> FastAPI:
         webhook_store = InMemoryWebhookSubscriptionStore()
 
     registry = SessionRegistry(ttl_seconds=session_ttl_seconds, metadata_store=metadata_store)
+    async_job_queue = InMemoryActionQueue(
+        store=async_job_queue_store,
+        idempotency_ttl_seconds=async_job_idempotency_ttl_seconds,
+    )
     api_tracer = OpenTelemetryTracer(component="api")
     orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
     audit_sink = build_audit_export_sink_from_env()
@@ -528,6 +572,51 @@ def create_app() -> FastAPI:
             created_at=float(payload.get("created_at", time.time())),
             updated_at=float(payload.get("updated_at", time.time())),
         )
+
+    def _to_async_job_response(job: ActionJob) -> AsyncJobResponse:
+        return AsyncJobResponse(
+            job_id=job.job_id,
+            idempotency_key=job.idempotency_key,
+            status=job.status.value,
+            action_payload=dict(job.action_payload),
+            attempts=job.attempts,
+            max_attempts=job.max_attempts,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            lease_worker_id=job.lease_worker_id,
+            lease_expires_at=job.lease_expires_at,
+            last_error=job.last_error,
+        )
+
+    def _submit_async_job(payload: AsyncJobSubmitRequest) -> AsyncJobSubmitResponse:
+        idempotency_key = payload.idempotency_key.strip() if payload.idempotency_key else ""
+        if not idempotency_key:
+            idempotency_key = f"job-{uuid4().hex}"
+
+        job = async_job_queue.dispatch(
+            {
+                "job_type": payload.job_type,
+                "input": payload.input,
+            },
+            idempotency_key=idempotency_key,
+        )
+        return AsyncJobSubmitResponse(job=_to_async_job_response(job))
+
+    def _get_async_job(job_id: str) -> AsyncJobResponse:
+        try:
+            job = async_job_queue.get_job(job_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+        return _to_async_job_response(job)
+
+    def _cancel_async_job(job_id: str) -> AsyncJobCancelResponse:
+        try:
+            job = async_job_queue.cancel(job_id, reason="canceled via api")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail=f"job not found: {job_id}") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return AsyncJobCancelResponse(canceled=True, job=_to_async_job_response(job))
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -1442,6 +1531,67 @@ def create_app() -> FastAPI:
         )
         _emit_lifecycle_event(request, event_type="session.resume", session_id=session_id)
         return payload
+
+    @app.post(f"{API_V1_PREFIX}/jobs", response_model=AsyncJobSubmitResponse)
+    def submit_async_job_v1(payload: AsyncJobSubmitRequest, request: Request) -> AsyncJobSubmitResponse:
+        submitted = _submit_async_job(payload)
+        _append_audit_event(
+            request,
+            action="async_job.submit",
+            resource_type="async_job",
+            resource_id=submitted.job.job_id,
+            details={"job_type": payload.job_type},
+        )
+        return submitted
+
+    @app.post("/jobs", response_model=AsyncJobSubmitResponse, deprecated=True)
+    def submit_async_job_legacy(
+        payload: AsyncJobSubmitRequest,
+        response: Response,
+        request: Request,
+    ) -> AsyncJobSubmitResponse:
+        _set_deprecation_headers(response)
+        submitted = _submit_async_job(payload)
+        _append_audit_event(
+            request,
+            action="async_job.submit",
+            resource_type="async_job",
+            resource_id=submitted.job.job_id,
+            details={"job_type": payload.job_type},
+        )
+        return submitted
+
+    @app.get(f"{API_V1_PREFIX}/jobs/{{job_id}}", response_model=AsyncJobResponse)
+    def get_async_job_v1(job_id: str) -> AsyncJobResponse:
+        return _get_async_job(job_id)
+
+    @app.get("/jobs/{job_id}", response_model=AsyncJobResponse, deprecated=True)
+    def get_async_job_legacy(job_id: str, response: Response) -> AsyncJobResponse:
+        _set_deprecation_headers(response)
+        return _get_async_job(job_id)
+
+    @app.post(f"{API_V1_PREFIX}/jobs/{{job_id}}/cancel", response_model=AsyncJobCancelResponse)
+    def cancel_async_job_v1(job_id: str, request: Request) -> AsyncJobCancelResponse:
+        canceled = _cancel_async_job(job_id)
+        _append_audit_event(
+            request,
+            action="async_job.cancel",
+            resource_type="async_job",
+            resource_id=job_id,
+        )
+        return canceled
+
+    @app.post("/jobs/{job_id}/cancel", response_model=AsyncJobCancelResponse, deprecated=True)
+    def cancel_async_job_legacy(job_id: str, response: Response, request: Request) -> AsyncJobCancelResponse:
+        _set_deprecation_headers(response)
+        canceled = _cancel_async_job(job_id)
+        _append_audit_event(
+            request,
+            action="async_job.cancel",
+            resource_type="async_job",
+            resource_id=job_id,
+        )
+        return canceled
 
     @app.get(f"{API_V1_PREFIX}/audit/logs", response_model=AuditLogListResponse)
     def list_audit_logs_v1(

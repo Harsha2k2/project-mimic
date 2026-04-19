@@ -19,6 +19,7 @@ class JobStatus(str, Enum):
     QUEUED = "queued"
     LEASED = "leased"
     COMPLETED = "completed"
+    CANCELED = "canceled"
     DEAD_LETTER = "dead_letter"
 
 
@@ -60,6 +61,9 @@ class ActionQueue(Protocol):
         ...
 
     def replay_dead_letter(self, job_id: str) -> ActionJob:
+        ...
+
+    def cancel(self, job_id: str, *, reason: str) -> ActionJob:
         ...
 
     def quarantine(self, job_id: str, *, reason: str) -> ActionJob:
@@ -276,6 +280,30 @@ class InMemoryActionQueue:
         except ValueError:
             pass
         self._ready.append(job_id)
+        self._persist_state()
+        return job
+
+    def cancel(self, job_id: str, *, reason: str) -> ActionJob:
+        job = self._jobs.get(job_id)
+        if job is None:
+            raise KeyError(job_id)
+
+        reason_text = reason.strip()
+        if not reason_text:
+            raise ValueError("reason is required")
+
+        if job.status in {JobStatus.COMPLETED, JobStatus.DEAD_LETTER, JobStatus.CANCELED}:
+            raise ValueError("job is already terminal")
+
+        now = self._now()
+        job.status = JobStatus.CANCELED
+        job.last_error = reason_text
+        job.lease_worker_id = None
+        job.lease_expires_at = None
+        job.updated_at = now
+
+        self._leases.pop(job_id, None)
+        self._ready = deque(queued_job_id for queued_job_id in self._ready if queued_job_id != job_id)
         self._persist_state()
         return job
 

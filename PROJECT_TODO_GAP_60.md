@@ -42,7 +42,7 @@ Execution rule for this backlog:
 27. [x] Build CLI for operational workflows (restore, rollback, replay, quarantine).
 28. [x] Publish official SDKs (Python and TypeScript) for client integration.
 29. [x] Add webhook/event subscription system for lifecycle events.
-30. [ ] Add async job API for long-running flows (submit, poll, cancel).
+30. [x] Add async job API for long-running flows (submit, poll, cancel).
 31. [ ] Add event stream delivery (SSE or message bus) for realtime status.
 32. [ ] Add model registry with rollout channels (dev, canary, prod).
 33. [ ] Add online model/grounding drift detection and threshold alerts.
