@@ -1,0 +1,40 @@
+name: deployment-policy
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  helm-and-manifest-policy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev]
+
+      - name: Helm lint
+        run: helm lint deploy/helm/project-mimic
+
+      - name: Render Helm chart
+        run: |
+          mkdir -p artifacts
+          helm template project-mimic deploy/helm/project-mimic > artifacts/rendered-helm.yaml
+
+      - name: Validate deployment manifests
+        run: python tools/deploy/check_manifests.py
