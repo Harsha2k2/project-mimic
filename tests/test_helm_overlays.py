@@ -22,6 +22,7 @@ def test_overlay_rendering_for_dev_environment() -> None:
 
     assert rendered["controlPlane"]["replicas"] == 1
     assert rendered["browserWorker"]["replicas"] == 2
+    assert rendered["browserWorker"]["engines"] == ["chromium", "firefox"]
     assert rendered["triton"]["gpuProfile"] == "spot"
     assert rendered["scaling"]["keda"]["browserWorker"]["maxReplicaCount"] == 8
 
@@ -34,6 +35,7 @@ def test_overlay_rendering_for_prod_environment() -> None:
 
     assert rendered["controlPlane"]["replicas"] == 4
     assert rendered["browserWorker"]["replicas"] == 12
+    assert rendered["browserWorker"]["engines"] == ["chromium", "firefox", "webkit"]
     assert rendered["triton"]["gpuProfile"] == "on-demand"
     assert rendered["scaling"]["hpa"]["maxReplicas"] == 60
     assert rendered["pdb"]["controlPlane"]["minAvailable"] == 2

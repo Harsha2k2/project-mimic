@@ -9,6 +9,10 @@ browserWorker:
   image: ghcr.io/harsha2k2/project-mimic-worker:latest
   sidecarImage: ghcr.io/harsha2k2/project-mimic-mimetic:latest
   replicas: 4
+  engines:
+    - chromium
+    - firefox
+    - webkit
 
 triton:
   image: nvcr.io/nvidia/tritonserver:24.07-py3

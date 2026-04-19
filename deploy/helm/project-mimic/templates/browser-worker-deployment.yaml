@@ -18,5 +18,10 @@ spec:
       containers:
         - name: worker
           image: {{ .Values.browserWorker.image }}
+          env:
+            - name: PLAYWRIGHT_BROWSERS
+              value: "{{ join \",\" .Values.browserWorker.engines }}"
+            - name: PLAYWRIGHT_PRIMARY_BROWSER
+              value: "{{ index .Values.browserWorker.engines 0 }}"
         - name: mimetic-sidecar
           image: {{ .Values.browserWorker.sidecarImage }}

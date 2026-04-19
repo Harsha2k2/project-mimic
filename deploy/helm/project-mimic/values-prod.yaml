@@ -3,6 +3,10 @@ controlPlane:
 
 browserWorker:
   replicas: 12
+  engines:
+    - chromium
+    - firefox
+    - webkit
 
 triton:
   replicas: 4

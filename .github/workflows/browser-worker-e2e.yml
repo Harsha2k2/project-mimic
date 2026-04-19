@@ -50,3 +50,7 @@ jobs:
       - name: Run integration tests
         run: |
           pytest tests/test_ephemeral_services.py tests/test_mimetic_replay_integration.py -q
+
+      - name: Run cross-browser parity tests
+        run: |
+          pytest tests/test_browser_worker_cross_engine_parity.py -q
