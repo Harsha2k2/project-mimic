@@ -24,6 +24,7 @@ from .audit_export import build_audit_export_sink_from_env
 from .drift_detection import DriftMonitor
 from .engine import ExecutionEngine
 from .event_stream import EventStreamBroker
+from .feature_flags import FeatureFlagService, InMemoryFeatureFlagStore, JsonFileFeatureFlagStore
 from .model_registry import InMemoryModelRegistryStore, JsonFileModelRegistryStore, ModelRegistry
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
@@ -338,6 +339,56 @@ class ModelChannelListResponse(APIPayloadModel):
     channels: dict[str, dict[str, Any] | None]
 
 
+class FeatureFlagUpsertRequest(APIPayloadModel):
+    flag_key: str
+    description: str = ""
+    enabled: bool = True
+    rollout_percentage: int = Field(default=100, ge=0, le=100)
+    tenant_allowlist: list[str] = Field(default_factory=list)
+    subject_allowlist: list[str] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class FeatureFlagResponse(APIPayloadModel):
+    flag_key: str
+    description: str
+    enabled: bool
+    rollout_percentage: int
+    tenant_allowlist: list[str] = Field(default_factory=list)
+    subject_allowlist: list[str] = Field(default_factory=list)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    created_at: float
+    updated_at: float
+
+
+class FeatureFlagListResponse(APIPayloadModel):
+    items: list[FeatureFlagResponse]
+    total: int
+
+
+class FeatureFlagDeleteResponse(APIPayloadModel):
+    flag_key: str
+    deleted: bool
+
+
+class FeatureFlagEvaluationRequest(APIPayloadModel):
+    flag_key: str
+    subject_key: str
+    tenant_id: str | None = None
+
+
+class FeatureFlagEvaluationResponse(APIPayloadModel):
+    flag_key: str
+    subject_key: str
+    tenant_id: str
+    enabled: bool
+    reason: str
+    bucket: int | None = None
+    rollout_percentage: int
+    matched_allowlist: bool
+    evaluated_at: float
+
+
 class DriftSampleRequest(APIPayloadModel):
     stream_id: str
     metric_name: str
@@ -499,6 +550,8 @@ def create_app() -> FastAPI:
     async_job_idempotency_ttl_seconds = int(os.getenv("ASYNC_JOB_IDEMPOTENCY_TTL_SECONDS", "3600"))
     model_registry_store_type = os.getenv("MODEL_REGISTRY_STORE", "memory").strip().lower()
     model_registry_file_path = os.getenv("MODEL_REGISTRY_FILE_PATH", "")
+    feature_flag_store_type = os.getenv("FEATURE_FLAG_STORE", "memory").strip().lower()
+    feature_flag_file_path = os.getenv("FEATURE_FLAG_FILE_PATH", "")
     drift_baseline_window = int(os.getenv("DRIFT_BASELINE_WINDOW", "20"))
     drift_recent_window = int(os.getenv("DRIFT_RECENT_WINDOW", "10"))
     drift_default_threshold = float(os.getenv("DRIFT_DEFAULT_THRESHOLD", "0.25"))
@@ -624,6 +677,13 @@ def create_app() -> FastAPI:
     else:
         model_registry_store = InMemoryModelRegistryStore()
 
+    if feature_flag_store_type == "file":
+        if not feature_flag_file_path:
+            raise RuntimeError("FEATURE_FLAG_FILE_PATH is required when FEATURE_FLAG_STORE=file")
+        feature_flag_store = JsonFileFeatureFlagStore(feature_flag_file_path)
+    else:
+        feature_flag_store = InMemoryFeatureFlagStore()
+
     if policy_decision_store_type == "file":
         if not policy_decision_file_path:
             raise RuntimeError("POLICY_DECISION_FILE_PATH is required when POLICY_DECISION_STORE=file")
@@ -651,6 +711,7 @@ def create_app() -> FastAPI:
         idempotency_ttl_seconds=async_job_idempotency_ttl_seconds,
     )
     model_registry = ModelRegistry(store=model_registry_store)
+    feature_flags = FeatureFlagService(store=feature_flag_store)
     drift_monitor = DriftMonitor(
         baseline_window=drift_baseline_window,
         recent_window=drift_recent_window,
@@ -683,6 +744,10 @@ def create_app() -> FastAPI:
 
     def _required_role_for_request(method: str, path: str) -> str:
         if path.startswith(f"{API_V1_PREFIX}/operator") or path.startswith("/operator"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/feature-flags/evaluate") or path.startswith("/feature-flags/evaluate"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/feature-flags") or path.startswith("/feature-flags"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/events/subscriptions") or path.startswith("/events/subscriptions"):
             return "admin"
@@ -883,6 +948,88 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return ModelPromotionResponse(assignment=assignment)
+
+    def _to_feature_flag_response(payload: dict[str, Any]) -> FeatureFlagResponse:
+        return FeatureFlagResponse(
+            flag_key=str(payload.get("flag_key", "")),
+            description=str(payload.get("description", "")),
+            enabled=bool(payload.get("enabled", False)),
+            rollout_percentage=int(payload.get("rollout_percentage", 0)),
+            tenant_allowlist=[str(item) for item in payload.get("tenant_allowlist", []) if isinstance(item, str)],
+            subject_allowlist=[str(item) for item in payload.get("subject_allowlist", []) if isinstance(item, str)],
+            metadata={
+                str(key): str(value)
+                for key, value in dict(payload.get("metadata", {})).items()
+            },
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _upsert_feature_flag(payload: FeatureFlagUpsertRequest) -> FeatureFlagResponse:
+        try:
+            flag = feature_flags.upsert(
+                flag_key=payload.flag_key,
+                description=payload.description,
+                enabled=payload.enabled,
+                rollout_percentage=payload.rollout_percentage,
+                tenant_allowlist=payload.tenant_allowlist,
+                subject_allowlist=payload.subject_allowlist,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_feature_flag_response(flag)
+
+    def _list_feature_flags() -> FeatureFlagListResponse:
+        items = [_to_feature_flag_response(item) for item in feature_flags.list()]
+        return FeatureFlagListResponse(items=items, total=len(items))
+
+    def _get_feature_flag(flag_key: str) -> FeatureFlagResponse:
+        try:
+            payload = feature_flags.get(flag_key=flag_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="feature flag not found") from exc
+        return _to_feature_flag_response(payload)
+
+    def _delete_feature_flag(flag_key: str) -> FeatureFlagDeleteResponse:
+        try:
+            deleted = feature_flags.delete(flag_key=flag_key)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="feature flag not found") from exc
+        return FeatureFlagDeleteResponse(flag_key=str(deleted.get("flag_key", flag_key)), deleted=True)
+
+    def _evaluate_feature_flag(
+        payload: FeatureFlagEvaluationRequest,
+        *,
+        tenant_id: str,
+    ) -> FeatureFlagEvaluationResponse:
+        if payload.tenant_id is not None and payload.tenant_id.strip() and payload.tenant_id.strip() != tenant_id:
+            raise HTTPException(status_code=403, detail="tenant override does not match caller scope")
+        target_tenant = payload.tenant_id.strip() if payload.tenant_id is not None else tenant_id
+        if not target_tenant:
+            target_tenant = tenant_id
+        try:
+            result = feature_flags.evaluate(
+                flag_key=payload.flag_key,
+                subject_key=payload.subject_key,
+                tenant_id=target_tenant,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="feature flag not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return FeatureFlagEvaluationResponse(
+            flag_key=str(result.get("flag_key", payload.flag_key)),
+            subject_key=str(result.get("subject_key", payload.subject_key)),
+            tenant_id=str(result.get("tenant_id", target_tenant)),
+            enabled=bool(result.get("enabled", False)),
+            reason=str(result.get("reason", "unknown")),
+            bucket=(None if result.get("bucket") is None else int(result.get("bucket"))),
+            rollout_percentage=int(result.get("rollout_percentage", 0)),
+            matched_allowlist=bool(result.get("matched_allowlist", False)),
+            evaluated_at=float(result.get("evaluated_at", time.time())),
+        )
 
     def _to_drift_status_response(payload: dict[str, Any]) -> DriftStatusResponse:
         return DriftStatusResponse(
@@ -2390,6 +2537,175 @@ def create_app() -> FastAPI:
     def list_model_channels_legacy(response: Response) -> ModelChannelListResponse:
         _set_deprecation_headers(response)
         return ModelChannelListResponse(channels=model_registry.list_channels())
+
+    @app.post(f"{API_V1_PREFIX}/feature-flags", response_model=FeatureFlagResponse)
+    def upsert_feature_flag_v1(
+        payload: FeatureFlagUpsertRequest,
+        request: Request,
+    ) -> FeatureFlagResponse:
+        flag = _upsert_feature_flag(payload)
+        _append_audit_event(
+            request,
+            action="feature.flag.upsert",
+            resource_type="feature_flag",
+            resource_id=flag.flag_key,
+            details={
+                "enabled": flag.enabled,
+                "rollout_percentage": flag.rollout_percentage,
+            },
+        )
+        _publish_realtime_event(
+            event_type="feature.flag.updated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "flag_key": flag.flag_key,
+                "enabled": flag.enabled,
+                "rollout_percentage": flag.rollout_percentage,
+            },
+        )
+        return flag
+
+    @app.post("/feature-flags", response_model=FeatureFlagResponse, deprecated=True)
+    def upsert_feature_flag_legacy(
+        payload: FeatureFlagUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> FeatureFlagResponse:
+        _set_deprecation_headers(response)
+        flag = _upsert_feature_flag(payload)
+        _append_audit_event(
+            request,
+            action="feature.flag.upsert",
+            resource_type="feature_flag",
+            resource_id=flag.flag_key,
+            details={
+                "enabled": flag.enabled,
+                "rollout_percentage": flag.rollout_percentage,
+            },
+        )
+        _publish_realtime_event(
+            event_type="feature.flag.updated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "flag_key": flag.flag_key,
+                "enabled": flag.enabled,
+                "rollout_percentage": flag.rollout_percentage,
+            },
+        )
+        return flag
+
+    @app.get(f"{API_V1_PREFIX}/feature-flags", response_model=FeatureFlagListResponse)
+    def list_feature_flags_v1() -> FeatureFlagListResponse:
+        return _list_feature_flags()
+
+    @app.get("/feature-flags", response_model=FeatureFlagListResponse, deprecated=True)
+    def list_feature_flags_legacy(response: Response) -> FeatureFlagListResponse:
+        _set_deprecation_headers(response)
+        return _list_feature_flags()
+
+    @app.get(f"{API_V1_PREFIX}/feature-flags/{{flag_key}}", response_model=FeatureFlagResponse)
+    def get_feature_flag_v1(flag_key: str) -> FeatureFlagResponse:
+        return _get_feature_flag(flag_key)
+
+    @app.get("/feature-flags/{flag_key}", response_model=FeatureFlagResponse, deprecated=True)
+    def get_feature_flag_legacy(flag_key: str, response: Response) -> FeatureFlagResponse:
+        _set_deprecation_headers(response)
+        return _get_feature_flag(flag_key)
+
+    @app.delete(f"{API_V1_PREFIX}/feature-flags/{{flag_key}}", response_model=FeatureFlagDeleteResponse)
+    def delete_feature_flag_v1(flag_key: str, request: Request) -> FeatureFlagDeleteResponse:
+        deleted = _delete_feature_flag(flag_key)
+        _append_audit_event(
+            request,
+            action="feature.flag.delete",
+            resource_type="feature_flag",
+            resource_id=deleted.flag_key,
+        )
+        _publish_realtime_event(
+            event_type="feature.flag.deleted",
+            tenant_id=_tenant_id(request),
+            payload={"flag_key": deleted.flag_key},
+        )
+        return deleted
+
+    @app.delete("/feature-flags/{flag_key}", response_model=FeatureFlagDeleteResponse, deprecated=True)
+    def delete_feature_flag_legacy(
+        flag_key: str,
+        response: Response,
+        request: Request,
+    ) -> FeatureFlagDeleteResponse:
+        _set_deprecation_headers(response)
+        deleted = _delete_feature_flag(flag_key)
+        _append_audit_event(
+            request,
+            action="feature.flag.delete",
+            resource_type="feature_flag",
+            resource_id=deleted.flag_key,
+        )
+        _publish_realtime_event(
+            event_type="feature.flag.deleted",
+            tenant_id=_tenant_id(request),
+            payload={"flag_key": deleted.flag_key},
+        )
+        return deleted
+
+    @app.post(f"{API_V1_PREFIX}/feature-flags/evaluate", response_model=FeatureFlagEvaluationResponse)
+    def evaluate_feature_flag_v1(
+        payload: FeatureFlagEvaluationRequest,
+        request: Request,
+    ) -> FeatureFlagEvaluationResponse:
+        evaluation = _evaluate_feature_flag(payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="feature.flag.evaluate",
+            resource_type="feature_flag",
+            resource_id=evaluation.flag_key,
+            details={
+                "enabled": evaluation.enabled,
+                "reason": evaluation.reason,
+                "bucket": evaluation.bucket,
+            },
+        )
+        _publish_realtime_event(
+            event_type="feature.flag.evaluated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "flag_key": evaluation.flag_key,
+                "enabled": evaluation.enabled,
+                "reason": evaluation.reason,
+            },
+        )
+        return evaluation
+
+    @app.post("/feature-flags/evaluate", response_model=FeatureFlagEvaluationResponse, deprecated=True)
+    def evaluate_feature_flag_legacy(
+        payload: FeatureFlagEvaluationRequest,
+        response: Response,
+        request: Request,
+    ) -> FeatureFlagEvaluationResponse:
+        _set_deprecation_headers(response)
+        evaluation = _evaluate_feature_flag(payload, tenant_id=_tenant_id(request))
+        _append_audit_event(
+            request,
+            action="feature.flag.evaluate",
+            resource_type="feature_flag",
+            resource_id=evaluation.flag_key,
+            details={
+                "enabled": evaluation.enabled,
+                "reason": evaluation.reason,
+                "bucket": evaluation.bucket,
+            },
+        )
+        _publish_realtime_event(
+            event_type="feature.flag.evaluated",
+            tenant_id=_tenant_id(request),
+            payload={
+                "flag_key": evaluation.flag_key,
+                "enabled": evaluation.enabled,
+                "reason": evaluation.reason,
+            },
+        )
+        return evaluation
 
     @app.post(f"{API_V1_PREFIX}/drift/samples", response_model=DriftStatusResponse)
     def ingest_drift_sample_v1(payload: DriftSampleRequest, request: Request) -> DriftStatusResponse:
