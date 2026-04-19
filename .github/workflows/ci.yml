@@ -34,6 +34,35 @@ jobs:
       - name: Run release automation dry-run
         run: python tools/release/create_release.py 0.0.0-ci --dry-run
 
+  security-scans:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install security scanners
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .[dev] semgrep pip-audit
+
+      - name: Run SAST with Semgrep
+        run: semgrep --config auto --error --metrics=off src tests tools
+
+      - name: Run dependency CVE scan
+        run: pip-audit
+
+      - name: Run container filesystem scan
+        run: |
+          docker run --rm \
+            -v "$PWD:/src" \
+            aquasec/trivy:latest \
+            fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 /src
+
   python-tests:
     runs-on: ubuntu-latest
     steps:

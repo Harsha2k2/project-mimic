@@ -32,6 +32,8 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/16-durable-queue-backend.md`
   - `lld/17-idempotency-store-ttl-replay-protection.md`
   - `lld/18-request-size-and-timeout-guards.md`
+  - `lld/19-hardened-cors-and-edge-security-policy-defaults.md`
+  - `lld/20-ci-security-scans.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
