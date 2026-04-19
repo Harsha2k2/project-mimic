@@ -37,6 +37,11 @@ from .multi_region_control_plane import (
     JsonFileMultiRegionControlPlaneStore,
     MultiRegionControlPlaneService,
 )
+from .managed_connectors import (
+    InMemoryManagedConnectorStore,
+    JsonFileManagedConnectorStore,
+    PartnerIntegrationService,
+)
 from .engine import ClickDecision, ExecutionEngine
 from .determinism import get_global_seed, resolve_seed, set_global_seed
 from .error_mapping import ErrorEnvelope, map_exception_to_error
@@ -204,6 +209,9 @@ __all__ = [
     "CostAwareScheduler",
     "InMemoryCostAwareSchedulerStore",
     "JsonFileCostAwareSchedulerStore",
+    "InMemoryManagedConnectorStore",
+    "JsonFileManagedConnectorStore",
+    "PartnerIntegrationService",
     "InMemoryMultiRegionControlPlaneStore",
     "JsonFileMultiRegionControlPlaneStore",
     "MultiRegionControlPlaneService",

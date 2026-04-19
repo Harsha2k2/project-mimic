@@ -52,6 +52,11 @@ from .identity_federation import (
     InMemoryIdentityFederationStore,
     JsonFileIdentityFederationStore,
 )
+from .managed_connectors import (
+    InMemoryManagedConnectorStore,
+    JsonFileManagedConnectorStore,
+    PartnerIntegrationService,
+)
 from .multi_region_control_plane import (
     InMemoryMultiRegionControlPlaneStore,
     JsonFileMultiRegionControlPlaneStore,
@@ -1386,6 +1391,77 @@ class IdentityAuthenticateResponse(APIPayloadModel):
     authenticated_at: float
 
 
+class ConnectorTemplateUpsertRequest(APIPayloadModel):
+    provider: str
+    category: str
+    auth_type: str
+    required_config_keys: list[str] = Field(default_factory=list)
+    optional_config_keys: list[str] = Field(default_factory=list)
+    default_scopes: list[str] = Field(default_factory=list)
+    webhook_supported: bool = True
+    rate_limit_per_minute: int = Field(ge=1)
+
+
+class ConnectorTemplateResponse(APIPayloadModel):
+    template_id: str
+    provider: str
+    category: str
+    auth_type: str
+    required_config_keys: list[str] = Field(default_factory=list)
+    optional_config_keys: list[str] = Field(default_factory=list)
+    default_scopes: list[str] = Field(default_factory=list)
+    webhook_supported: bool
+    rate_limit_per_minute: int
+    created_at: float
+    updated_at: float
+
+
+class ConnectorTemplateListResponse(APIPayloadModel):
+    items: list[ConnectorTemplateResponse]
+    total: int
+
+
+class ConnectorInstanceCreateRequest(APIPayloadModel):
+    template_id: str
+    name: str
+    config: dict[str, str] = Field(default_factory=dict)
+    enabled: bool = True
+
+
+class ConnectorInstanceUpdateRequest(APIPayloadModel):
+    name: str | None = None
+    config: dict[str, str] | None = None
+    enabled: bool | None = None
+
+
+class ConnectorInstanceResponse(APIPayloadModel):
+    connector_id: str
+    tenant_id: str
+    template_id: str
+    name: str
+    config: dict[str, str] = Field(default_factory=dict)
+    enabled: bool
+    health: str
+    last_checked_at: float | None = None
+    last_error: str | None = None
+    created_at: float
+    updated_at: float
+
+
+class ConnectorInstanceListResponse(APIPayloadModel):
+    items: list[ConnectorInstanceResponse]
+    total: int
+
+
+class ConnectorHealthResponse(APIPayloadModel):
+    connector_id: str
+    tenant_id: str
+    health: str
+    healthy: bool
+    last_checked_at: float
+    last_error: str | None = None
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1503,6 +1579,8 @@ def create_app() -> FastAPI:
     status_portal_file_path = os.getenv("STATUS_PORTAL_FILE_PATH", "")
     identity_federation_store_type = os.getenv("IDENTITY_FEDERATION_STORE", "memory").strip().lower()
     identity_federation_file_path = os.getenv("IDENTITY_FEDERATION_FILE_PATH", "")
+    managed_connector_store_type = os.getenv("MANAGED_CONNECTOR_STORE", "memory").strip().lower()
+    managed_connector_file_path = os.getenv("MANAGED_CONNECTOR_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -1748,6 +1826,13 @@ def create_app() -> FastAPI:
     else:
         identity_federation_store = InMemoryIdentityFederationStore()
 
+    if managed_connector_store_type == "file":
+        if not managed_connector_file_path:
+            raise RuntimeError("MANAGED_CONNECTOR_FILE_PATH is required when MANAGED_CONNECTOR_STORE=file")
+        managed_connector_store = JsonFileManagedConnectorStore(managed_connector_file_path)
+    else:
+        managed_connector_store = InMemoryManagedConnectorStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -1893,6 +1978,7 @@ def create_app() -> FastAPI:
     privacy_analytics = PrivacyPreservingAnalyticsService(store=privacy_analytics_store)
     status_portal = CustomerStatusPortalService(store=status_portal_store)
     identity_federation = EnterpriseIdentityFederationService(store=identity_federation_store)
+    partner_integrations = PartnerIntegrationService(store=managed_connector_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -2016,6 +2102,12 @@ def create_app() -> FastAPI:
             if method.upper() in {"GET"}:
                 return "operator"
             return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/connectors/templates") or path.startswith("/connectors/templates"):
+            if method.upper() in {"GET"}:
+                return "operator"
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/connectors/instances") or path.startswith("/connectors/instances"):
+            return "operator"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/governance") or path.startswith("/governance"):
@@ -4548,6 +4640,178 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=400, detail=message) from exc
 
         return _to_identity_authenticate_response(authn)
+
+    def _to_connector_template_response(payload: dict[str, Any]) -> ConnectorTemplateResponse:
+        return ConnectorTemplateResponse(
+            template_id=str(payload.get("template_id", "")),
+            provider=str(payload.get("provider", "")),
+            category=str(payload.get("category", "")),
+            auth_type=str(payload.get("auth_type", "")),
+            required_config_keys=[
+                str(item)
+                for item in payload.get("required_config_keys", [])
+                if isinstance(item, str)
+            ],
+            optional_config_keys=[
+                str(item)
+                for item in payload.get("optional_config_keys", [])
+                if isinstance(item, str)
+            ],
+            default_scopes=[
+                str(item)
+                for item in payload.get("default_scopes", [])
+                if isinstance(item, str)
+            ],
+            webhook_supported=bool(payload.get("webhook_supported", False)),
+            rate_limit_per_minute=int(payload.get("rate_limit_per_minute", 1)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_connector_instance_response(payload: dict[str, Any]) -> ConnectorInstanceResponse:
+        return ConnectorInstanceResponse(
+            connector_id=str(payload.get("connector_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            template_id=str(payload.get("template_id", "")),
+            name=str(payload.get("name", "")),
+            config={
+                str(key): str(value)
+                for key, value in dict(payload.get("config", {})).items()
+            },
+            enabled=bool(payload.get("enabled", False)),
+            health=str(payload.get("health", "unknown")),
+            last_checked_at=(
+                None
+                if payload.get("last_checked_at") is None
+                else float(payload.get("last_checked_at"))
+            ),
+            last_error=(
+                None
+                if payload.get("last_error") is None
+                else str(payload.get("last_error"))
+            ),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_connector_health_response(payload: dict[str, Any]) -> ConnectorHealthResponse:
+        return ConnectorHealthResponse(
+            connector_id=str(payload.get("connector_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            health=str(payload.get("health", "unknown")),
+            healthy=bool(payload.get("healthy", False)),
+            last_checked_at=float(payload.get("last_checked_at", 0.0)),
+            last_error=(None if payload.get("last_error") is None else str(payload.get("last_error"))),
+        )
+
+    def _upsert_connector_template(
+        template_id: str,
+        payload: ConnectorTemplateUpsertRequest,
+    ) -> ConnectorTemplateResponse:
+        try:
+            template = partner_integrations.upsert_template(
+                template_id=template_id,
+                provider=payload.provider,
+                category=payload.category,
+                auth_type=payload.auth_type,
+                required_config_keys=payload.required_config_keys,
+                optional_config_keys=payload.optional_config_keys,
+                default_scopes=payload.default_scopes,
+                webhook_supported=payload.webhook_supported,
+                rate_limit_per_minute=payload.rate_limit_per_minute,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_connector_template_response(template)
+
+    def _list_connector_templates(category: str | None = None) -> ConnectorTemplateListResponse:
+        templates = partner_integrations.list_templates(category=category)
+        items = [_to_connector_template_response(item) for item in templates]
+        return ConnectorTemplateListResponse(items=items, total=len(items))
+
+    def _get_connector_template(template_id: str) -> ConnectorTemplateResponse:
+        try:
+            template = partner_integrations.get_template(template_id=template_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if template is None:
+            raise HTTPException(status_code=404, detail="connector template not found")
+        return _to_connector_template_response(template)
+
+    def _create_connector_instance(
+        connector_id: str,
+        payload: ConnectorInstanceCreateRequest,
+        request: Request,
+    ) -> ConnectorInstanceResponse:
+        try:
+            connector = partner_integrations.create_connector(
+                tenant_id=_tenant_id(request),
+                connector_id=connector_id,
+                template_id=payload.template_id,
+                name=payload.name,
+                config=payload.config,
+                enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_connector_instance_response(connector)
+
+    def _update_connector_instance(
+        connector_id: str,
+        payload: ConnectorInstanceUpdateRequest,
+        request: Request,
+    ) -> ConnectorInstanceResponse:
+        try:
+            connector = partner_integrations.update_connector(
+                tenant_id=_tenant_id(request),
+                connector_id=connector_id,
+                name=payload.name,
+                config=payload.config,
+                enabled=payload.enabled,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"connector not found", "connector does not belong to tenant"}:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+
+        return _to_connector_instance_response(connector)
+
+    def _get_connector_instance(connector_id: str, request: Request) -> ConnectorInstanceResponse:
+        try:
+            connector = partner_integrations.get_connector(tenant_id=_tenant_id(request), connector_id=connector_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if connector is None:
+            raise HTTPException(status_code=404, detail="connector not found")
+        return _to_connector_instance_response(connector)
+
+    def _list_connector_instances(
+        request: Request,
+        enabled: bool | None = None,
+    ) -> ConnectorInstanceListResponse:
+        try:
+            connectors = partner_integrations.list_connectors(tenant_id=_tenant_id(request), enabled=enabled)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_connector_instance_response(item) for item in connectors]
+        return ConnectorInstanceListResponse(items=items, total=len(items))
+
+    def _check_connector_health(connector_id: str, request: Request) -> ConnectorHealthResponse:
+        try:
+            health = partner_integrations.check_connector_health(tenant_id=_tenant_id(request), connector_id=connector_id)
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"connector not found", "connector does not belong to tenant"}:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+
+        return _to_connector_health_response(health)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -8802,6 +9066,260 @@ def create_app() -> FastAPI:
             },
         )
         return authn
+
+    @app.post(
+        f"{API_V1_PREFIX}/connectors/templates/{{template_id}}",
+        response_model=ConnectorTemplateResponse,
+    )
+    def upsert_connector_template_v1(
+        template_id: str,
+        payload: ConnectorTemplateUpsertRequest,
+        request: Request,
+    ) -> ConnectorTemplateResponse:
+        template = _upsert_connector_template(template_id, payload)
+        _append_audit_event(
+            request,
+            action="connector.template.upsert",
+            resource_type="connector_template",
+            resource_id=template.template_id,
+            details={"provider": template.provider, "category": template.category},
+        )
+        return template
+
+    @app.post(
+        "/connectors/templates/{template_id}",
+        response_model=ConnectorTemplateResponse,
+        deprecated=True,
+    )
+    def upsert_connector_template_legacy(
+        template_id: str,
+        payload: ConnectorTemplateUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> ConnectorTemplateResponse:
+        _set_deprecation_headers(response)
+        template = _upsert_connector_template(template_id, payload)
+        _append_audit_event(
+            request,
+            action="connector.template.upsert",
+            resource_type="connector_template",
+            resource_id=template.template_id,
+            details={"provider": template.provider, "category": template.category},
+        )
+        return template
+
+    @app.get(
+        f"{API_V1_PREFIX}/connectors/templates",
+        response_model=ConnectorTemplateListResponse,
+    )
+    def list_connector_templates_v1(
+        category: str | None = Query(default=None),
+    ) -> ConnectorTemplateListResponse:
+        return _list_connector_templates(category)
+
+    @app.get(
+        "/connectors/templates",
+        response_model=ConnectorTemplateListResponse,
+        deprecated=True,
+    )
+    def list_connector_templates_legacy(
+        response: Response,
+        category: str | None = Query(default=None),
+    ) -> ConnectorTemplateListResponse:
+        _set_deprecation_headers(response)
+        return _list_connector_templates(category)
+
+    @app.get(
+        f"{API_V1_PREFIX}/connectors/templates/{{template_id}}",
+        response_model=ConnectorTemplateResponse,
+    )
+    def get_connector_template_v1(template_id: str) -> ConnectorTemplateResponse:
+        return _get_connector_template(template_id)
+
+    @app.get(
+        "/connectors/templates/{template_id}",
+        response_model=ConnectorTemplateResponse,
+        deprecated=True,
+    )
+    def get_connector_template_legacy(
+        template_id: str,
+        response: Response,
+    ) -> ConnectorTemplateResponse:
+        _set_deprecation_headers(response)
+        return _get_connector_template(template_id)
+
+    @app.post(
+        f"{API_V1_PREFIX}/connectors/instances/{{connector_id}}",
+        response_model=ConnectorInstanceResponse,
+    )
+    def create_connector_instance_v1(
+        connector_id: str,
+        payload: ConnectorInstanceCreateRequest,
+        request: Request,
+    ) -> ConnectorInstanceResponse:
+        connector = _create_connector_instance(connector_id, payload, request)
+        _append_audit_event(
+            request,
+            action="connector.instance.create",
+            resource_type="connector_instance",
+            resource_id=connector.connector_id,
+            details={"template_id": connector.template_id, "enabled": connector.enabled},
+        )
+        return connector
+
+    @app.post(
+        "/connectors/instances/{connector_id}",
+        response_model=ConnectorInstanceResponse,
+        deprecated=True,
+    )
+    def create_connector_instance_legacy(
+        connector_id: str,
+        payload: ConnectorInstanceCreateRequest,
+        response: Response,
+        request: Request,
+    ) -> ConnectorInstanceResponse:
+        _set_deprecation_headers(response)
+        connector = _create_connector_instance(connector_id, payload, request)
+        _append_audit_event(
+            request,
+            action="connector.instance.create",
+            resource_type="connector_instance",
+            resource_id=connector.connector_id,
+            details={"template_id": connector.template_id, "enabled": connector.enabled},
+        )
+        return connector
+
+    @app.patch(
+        f"{API_V1_PREFIX}/connectors/instances/{{connector_id}}",
+        response_model=ConnectorInstanceResponse,
+    )
+    def update_connector_instance_v1(
+        connector_id: str,
+        payload: ConnectorInstanceUpdateRequest,
+        request: Request,
+    ) -> ConnectorInstanceResponse:
+        connector = _update_connector_instance(connector_id, payload, request)
+        _append_audit_event(
+            request,
+            action="connector.instance.update",
+            resource_type="connector_instance",
+            resource_id=connector.connector_id,
+            details={"enabled": connector.enabled, "health": connector.health},
+        )
+        return connector
+
+    @app.patch(
+        "/connectors/instances/{connector_id}",
+        response_model=ConnectorInstanceResponse,
+        deprecated=True,
+    )
+    def update_connector_instance_legacy(
+        connector_id: str,
+        payload: ConnectorInstanceUpdateRequest,
+        response: Response,
+        request: Request,
+    ) -> ConnectorInstanceResponse:
+        _set_deprecation_headers(response)
+        connector = _update_connector_instance(connector_id, payload, request)
+        _append_audit_event(
+            request,
+            action="connector.instance.update",
+            resource_type="connector_instance",
+            resource_id=connector.connector_id,
+            details={"enabled": connector.enabled, "health": connector.health},
+        )
+        return connector
+
+    @app.get(
+        f"{API_V1_PREFIX}/connectors/instances",
+        response_model=ConnectorInstanceListResponse,
+    )
+    def list_connector_instances_v1(
+        request: Request,
+        enabled: bool | None = Query(default=None),
+    ) -> ConnectorInstanceListResponse:
+        return _list_connector_instances(request, enabled=enabled)
+
+    @app.get(
+        "/connectors/instances",
+        response_model=ConnectorInstanceListResponse,
+        deprecated=True,
+    )
+    def list_connector_instances_legacy(
+        response: Response,
+        request: Request,
+        enabled: bool | None = Query(default=None),
+    ) -> ConnectorInstanceListResponse:
+        _set_deprecation_headers(response)
+        return _list_connector_instances(request, enabled=enabled)
+
+    @app.get(
+        f"{API_V1_PREFIX}/connectors/instances/{{connector_id}}",
+        response_model=ConnectorInstanceResponse,
+    )
+    def get_connector_instance_v1(
+        connector_id: str,
+        request: Request,
+    ) -> ConnectorInstanceResponse:
+        return _get_connector_instance(connector_id, request)
+
+    @app.get(
+        "/connectors/instances/{connector_id}",
+        response_model=ConnectorInstanceResponse,
+        deprecated=True,
+    )
+    def get_connector_instance_legacy(
+        connector_id: str,
+        response: Response,
+        request: Request,
+    ) -> ConnectorInstanceResponse:
+        _set_deprecation_headers(response)
+        return _get_connector_instance(connector_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/connectors/instances/{{connector_id}}/health-check",
+        response_model=ConnectorHealthResponse,
+    )
+    def check_connector_health_v1(
+        connector_id: str,
+        request: Request,
+    ) -> ConnectorHealthResponse:
+        health = _check_connector_health(connector_id, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="connector_health_check", units=1.0)
+        _publish_realtime_event(
+            event_type="connector.health.checked",
+            tenant_id=_tenant_id(request),
+            payload={
+                "connector_id": health.connector_id,
+                "healthy": health.healthy,
+                "health": health.health,
+            },
+        )
+        return health
+
+    @app.post(
+        "/connectors/instances/{connector_id}/health-check",
+        response_model=ConnectorHealthResponse,
+        deprecated=True,
+    )
+    def check_connector_health_legacy(
+        connector_id: str,
+        response: Response,
+        request: Request,
+    ) -> ConnectorHealthResponse:
+        _set_deprecation_headers(response)
+        health = _check_connector_health(connector_id, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="connector_health_check", units=1.0)
+        _publish_realtime_event(
+            event_type="connector.health.checked",
+            tenant_id=_tenant_id(request),
+            payload={
+                "connector_id": health.connector_id,
+                "healthy": health.healthy,
+                "health": health.health,
+            },
+        )
+        return health
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:

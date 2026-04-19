@@ -70,7 +70,7 @@ Execution rule for this backlog:
 52. [x] Add privacy-preserving analytics layer for tenant reporting.
 53. [x] Add customer-facing SLA and status portal.
 54. [x] Add enterprise SSO (OIDC/SAML) and SCIM provisioning.
-55. [ ] Add partner integration templates and managed connectors.
+55. [x] Add partner integration templates and managed connectors.
 56. [ ] Add workflow marketplace for reusable automation recipes.
 57. [ ] Add benchmark lab with reproducible cross-version comparisons.
 58. [ ] Add release readiness scorecard auto-generated from CI evidence.
