@@ -52,6 +52,11 @@ from .identity import (
     calculate_risk_score,
     should_rotate_identity,
 )
+from .identity_federation import (
+    EnterpriseIdentityFederationService,
+    InMemoryIdentityFederationStore,
+    JsonFileIdentityFederationStore,
+)
 from .grpc_runtime import (
     Ack,
     AnalyzeFrameRequest,
@@ -208,7 +213,9 @@ __all__ = [
     "GroundActionResponse",
     "IdentityAllocator",
     "IdentityBundle",
+    "EnterpriseIdentityFederationService",
     "InMemoryArtifactWriter",
+    "InMemoryIdentityFederationStore",
     "InMemoryProxyPoolStore",
     "Observation",
     "JitterProfile",
@@ -229,6 +236,7 @@ __all__ = [
     "JobStatus",
     "JsonFileQueueStore",
     "JsonFileAutonomousRemediationStore",
+    "JsonFileIdentityFederationStore",
     "ProjectMimicEnv",
     "ProxyEndpoint",
     "ProxyHealthEvent",

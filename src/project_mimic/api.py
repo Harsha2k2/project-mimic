@@ -47,6 +47,11 @@ from .governance_controls import (
     InMemoryGovernancePolicyStore,
     JsonFileGovernancePolicyStore,
 )
+from .identity_federation import (
+    EnterpriseIdentityFederationService,
+    InMemoryIdentityFederationStore,
+    JsonFileIdentityFederationStore,
+)
 from .multi_region_control_plane import (
     InMemoryMultiRegionControlPlaneStore,
     JsonFileMultiRegionControlPlaneStore,
@@ -1281,6 +1286,106 @@ class StatusSLAEvaluationResponse(APIPayloadModel):
     evaluated_at: float
 
 
+class IdentityProviderUpsertRequest(APIPayloadModel):
+    protocol: str
+    issuer: str
+    client_id: str
+    metadata_url: str | None = None
+    authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
+    jwks_uri: str | None = None
+    saml_sso_url: str | None = None
+    saml_entity_id: str | None = None
+    enabled: bool = True
+    default_role: str = "viewer"
+
+
+class IdentityProviderResponse(APIPayloadModel):
+    tenant_id: str
+    provider_id: str
+    protocol: str
+    issuer: str
+    client_id: str
+    metadata_url: str | None = None
+    authorization_endpoint: str | None = None
+    token_endpoint: str | None = None
+    jwks_uri: str | None = None
+    saml_sso_url: str | None = None
+    saml_entity_id: str | None = None
+    enabled: bool
+    default_role: str
+    created_at: float
+    updated_at: float
+
+
+class IdentityProviderListResponse(APIPayloadModel):
+    items: list[IdentityProviderResponse]
+    total: int
+
+
+class SCIMUserUpsertRequest(APIPayloadModel):
+    email: str
+    display_name: str
+    active: bool = True
+    role: str = "viewer"
+
+
+class SCIMUserResponse(APIPayloadModel):
+    user_id: str
+    tenant_id: str
+    external_id: str
+    email: str
+    display_name: str
+    active: bool
+    role: str
+    created_at: float
+    updated_at: float
+
+
+class SCIMUserListResponse(APIPayloadModel):
+    items: list[SCIMUserResponse]
+    total: int
+
+
+class SCIMGroupUpsertRequest(APIPayloadModel):
+    display_name: str
+    members: list[str] = Field(default_factory=list)
+
+
+class SCIMGroupResponse(APIPayloadModel):
+    group_id: str
+    tenant_id: str
+    external_id: str
+    display_name: str
+    members: list[str] = Field(default_factory=list)
+    created_at: float
+    updated_at: float
+
+
+class SCIMGroupListResponse(APIPayloadModel):
+    items: list[SCIMGroupResponse]
+    total: int
+
+
+class IdentityAuthenticateRequest(APIPayloadModel):
+    provider_id: str
+    subject: str
+    email: str
+    groups: list[str] = Field(default_factory=list)
+
+
+class IdentityAuthenticateResponse(APIPayloadModel):
+    tenant_id: str
+    provider_id: str
+    subject: str
+    email: str
+    groups: list[str] = Field(default_factory=list)
+    role: str
+    scim_user_id: str | None = None
+    authenticated: bool
+    authenticated_at: float
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1396,6 +1501,8 @@ def create_app() -> FastAPI:
     privacy_analytics_file_path = os.getenv("PRIVACY_ANALYTICS_FILE_PATH", "")
     status_portal_store_type = os.getenv("STATUS_PORTAL_STORE", "memory").strip().lower()
     status_portal_file_path = os.getenv("STATUS_PORTAL_FILE_PATH", "")
+    identity_federation_store_type = os.getenv("IDENTITY_FEDERATION_STORE", "memory").strip().lower()
+    identity_federation_file_path = os.getenv("IDENTITY_FEDERATION_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -1634,6 +1741,13 @@ def create_app() -> FastAPI:
     else:
         status_portal_store = InMemoryStatusPortalStore()
 
+    if identity_federation_store_type == "file":
+        if not identity_federation_file_path:
+            raise RuntimeError("IDENTITY_FEDERATION_FILE_PATH is required when IDENTITY_FEDERATION_STORE=file")
+        identity_federation_store = JsonFileIdentityFederationStore(identity_federation_file_path)
+    else:
+        identity_federation_store = InMemoryIdentityFederationStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -1778,6 +1892,7 @@ def create_app() -> FastAPI:
     policy_verification = PolicyVerificationService(store=policy_verification_store)
     privacy_analytics = PrivacyPreservingAnalyticsService(store=privacy_analytics_store)
     status_portal = CustomerStatusPortalService(store=status_portal_store)
+    identity_federation = EnterpriseIdentityFederationService(store=identity_federation_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -1890,6 +2005,16 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/status/services") or path.startswith("/status/services"):
             if method.upper() in {"GET"}:
                 return "viewer"
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/identity/authenticate") or path.startswith("/identity/authenticate"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/identity/scim") or path.startswith("/identity/scim"):
+            if method.upper() in {"GET"}:
+                return "operator"
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/identity/providers") or path.startswith("/identity/providers"):
+            if method.upper() in {"GET"}:
+                return "operator"
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -4232,6 +4357,197 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail=message) from exc
             raise HTTPException(status_code=400, detail=message) from exc
         return _to_status_sla_evaluation_response(evaluation)
+
+    def _to_identity_provider_response(payload: dict[str, Any]) -> IdentityProviderResponse:
+        return IdentityProviderResponse(
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            provider_id=str(payload.get("provider_id", "")),
+            protocol=str(payload.get("protocol", "")),
+            issuer=str(payload.get("issuer", "")),
+            client_id=str(payload.get("client_id", "")),
+            metadata_url=(None if payload.get("metadata_url") is None else str(payload.get("metadata_url"))),
+            authorization_endpoint=(
+                None
+                if payload.get("authorization_endpoint") is None
+                else str(payload.get("authorization_endpoint"))
+            ),
+            token_endpoint=(None if payload.get("token_endpoint") is None else str(payload.get("token_endpoint"))),
+            jwks_uri=(None if payload.get("jwks_uri") is None else str(payload.get("jwks_uri"))),
+            saml_sso_url=(None if payload.get("saml_sso_url") is None else str(payload.get("saml_sso_url"))),
+            saml_entity_id=(
+                None
+                if payload.get("saml_entity_id") is None
+                else str(payload.get("saml_entity_id"))
+            ),
+            enabled=bool(payload.get("enabled", True)),
+            default_role=str(payload.get("default_role", "viewer")),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_scim_user_response(payload: dict[str, Any]) -> SCIMUserResponse:
+        return SCIMUserResponse(
+            user_id=str(payload.get("user_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            external_id=str(payload.get("external_id", "")),
+            email=str(payload.get("email", "")),
+            display_name=str(payload.get("display_name", "")),
+            active=bool(payload.get("active", False)),
+            role=str(payload.get("role", "viewer")),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_scim_group_response(payload: dict[str, Any]) -> SCIMGroupResponse:
+        return SCIMGroupResponse(
+            group_id=str(payload.get("group_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            external_id=str(payload.get("external_id", "")),
+            display_name=str(payload.get("display_name", "")),
+            members=[
+                str(item)
+                for item in payload.get("members", [])
+                if isinstance(item, str)
+            ],
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_identity_authenticate_response(payload: dict[str, Any]) -> IdentityAuthenticateResponse:
+        return IdentityAuthenticateResponse(
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            provider_id=str(payload.get("provider_id", "")),
+            subject=str(payload.get("subject", "")),
+            email=str(payload.get("email", "")),
+            groups=[
+                str(item)
+                for item in payload.get("groups", [])
+                if isinstance(item, str)
+            ],
+            role=str(payload.get("role", "viewer")),
+            scim_user_id=(None if payload.get("scim_user_id") is None else str(payload.get("scim_user_id"))),
+            authenticated=bool(payload.get("authenticated", False)),
+            authenticated_at=float(payload.get("authenticated_at", 0.0)),
+        )
+
+    def _upsert_identity_provider(
+        provider_id: str,
+        payload: IdentityProviderUpsertRequest,
+        request: Request,
+    ) -> IdentityProviderResponse:
+        try:
+            provider = identity_federation.upsert_provider(
+                tenant_id=_tenant_id(request),
+                provider_id=provider_id,
+                protocol=payload.protocol,
+                issuer=payload.issuer,
+                client_id=payload.client_id,
+                metadata_url=payload.metadata_url,
+                authorization_endpoint=payload.authorization_endpoint,
+                token_endpoint=payload.token_endpoint,
+                jwks_uri=payload.jwks_uri,
+                saml_sso_url=payload.saml_sso_url,
+                saml_entity_id=payload.saml_entity_id,
+                enabled=payload.enabled,
+                default_role=payload.default_role,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_identity_provider_response(provider)
+
+    def _list_identity_providers(request: Request) -> IdentityProviderListResponse:
+        try:
+            providers = identity_federation.list_providers(tenant_id=_tenant_id(request))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_identity_provider_response(item) for item in providers]
+        return IdentityProviderListResponse(items=items, total=len(items))
+
+    def _get_identity_provider(provider_id: str, request: Request) -> IdentityProviderResponse:
+        try:
+            provider = identity_federation.get_provider(provider_id=provider_id, tenant_id=_tenant_id(request))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if provider is None:
+            raise HTTPException(status_code=404, detail="identity provider not found")
+        return _to_identity_provider_response(provider)
+
+    def _upsert_scim_user(
+        external_id: str,
+        payload: SCIMUserUpsertRequest,
+        request: Request,
+    ) -> SCIMUserResponse:
+        try:
+            user = identity_federation.scim_upsert_user(
+                tenant_id=_tenant_id(request),
+                external_id=external_id,
+                email=payload.email,
+                display_name=payload.display_name,
+                active=payload.active,
+                role=payload.role,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_scim_user_response(user)
+
+    def _list_scim_users(request: Request, active: bool | None = None) -> SCIMUserListResponse:
+        try:
+            users = identity_federation.list_scim_users(tenant_id=_tenant_id(request), active=active)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_scim_user_response(item) for item in users]
+        return SCIMUserListResponse(items=items, total=len(items))
+
+    def _upsert_scim_group(
+        external_id: str,
+        payload: SCIMGroupUpsertRequest,
+        request: Request,
+    ) -> SCIMGroupResponse:
+        try:
+            group = identity_federation.scim_upsert_group(
+                tenant_id=_tenant_id(request),
+                external_id=external_id,
+                display_name=payload.display_name,
+                members=payload.members,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_scim_group_response(group)
+
+    def _list_scim_groups(request: Request) -> SCIMGroupListResponse:
+        try:
+            groups = identity_federation.list_scim_groups(tenant_id=_tenant_id(request))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_scim_group_response(item) for item in groups]
+        return SCIMGroupListResponse(items=items, total=len(items))
+
+    def _authenticate_identity(
+        payload: IdentityAuthenticateRequest,
+        request: Request,
+    ) -> IdentityAuthenticateResponse:
+        try:
+            authn = identity_federation.authenticate(
+                tenant_id=_tenant_id(request),
+                provider_id=payload.provider_id,
+                subject=payload.subject,
+                email=payload.email,
+                groups=payload.groups,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            if message in {"provider not found", "provider is disabled"}:
+                raise HTTPException(status_code=404, detail=message) from exc
+            raise HTTPException(status_code=400, detail=message) from exc
+
+        return _to_identity_authenticate_response(authn)
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -8243,6 +8559,249 @@ def create_app() -> FastAPI:
             },
         )
         return evaluation
+
+    @app.post(
+        f"{API_V1_PREFIX}/identity/providers/{{provider_id}}",
+        response_model=IdentityProviderResponse,
+    )
+    def upsert_identity_provider_v1(
+        provider_id: str,
+        payload: IdentityProviderUpsertRequest,
+        request: Request,
+    ) -> IdentityProviderResponse:
+        provider = _upsert_identity_provider(provider_id, payload, request)
+        _append_audit_event(
+            request,
+            action="identity.provider.upsert",
+            resource_type="identity_provider",
+            resource_id=provider.provider_id,
+            details={"protocol": provider.protocol, "enabled": provider.enabled},
+        )
+        return provider
+
+    @app.post(
+        "/identity/providers/{provider_id}",
+        response_model=IdentityProviderResponse,
+        deprecated=True,
+    )
+    def upsert_identity_provider_legacy(
+        provider_id: str,
+        payload: IdentityProviderUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> IdentityProviderResponse:
+        _set_deprecation_headers(response)
+        provider = _upsert_identity_provider(provider_id, payload, request)
+        _append_audit_event(
+            request,
+            action="identity.provider.upsert",
+            resource_type="identity_provider",
+            resource_id=provider.provider_id,
+            details={"protocol": provider.protocol, "enabled": provider.enabled},
+        )
+        return provider
+
+    @app.get(
+        f"{API_V1_PREFIX}/identity/providers",
+        response_model=IdentityProviderListResponse,
+    )
+    def list_identity_providers_v1(request: Request) -> IdentityProviderListResponse:
+        return _list_identity_providers(request)
+
+    @app.get(
+        "/identity/providers",
+        response_model=IdentityProviderListResponse,
+        deprecated=True,
+    )
+    def list_identity_providers_legacy(response: Response, request: Request) -> IdentityProviderListResponse:
+        _set_deprecation_headers(response)
+        return _list_identity_providers(request)
+
+    @app.get(
+        f"{API_V1_PREFIX}/identity/providers/{{provider_id}}",
+        response_model=IdentityProviderResponse,
+    )
+    def get_identity_provider_v1(provider_id: str, request: Request) -> IdentityProviderResponse:
+        return _get_identity_provider(provider_id, request)
+
+    @app.get(
+        "/identity/providers/{provider_id}",
+        response_model=IdentityProviderResponse,
+        deprecated=True,
+    )
+    def get_identity_provider_legacy(
+        provider_id: str,
+        response: Response,
+        request: Request,
+    ) -> IdentityProviderResponse:
+        _set_deprecation_headers(response)
+        return _get_identity_provider(provider_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/identity/scim/users/{{external_id}}",
+        response_model=SCIMUserResponse,
+    )
+    def upsert_scim_user_v1(
+        external_id: str,
+        payload: SCIMUserUpsertRequest,
+        request: Request,
+    ) -> SCIMUserResponse:
+        user = _upsert_scim_user(external_id, payload, request)
+        _append_audit_event(
+            request,
+            action="identity.scim.user.upsert",
+            resource_type="scim_user",
+            resource_id=user.user_id,
+            details={"external_id": user.external_id, "active": user.active, "role": user.role},
+        )
+        return user
+
+    @app.post(
+        "/identity/scim/users/{external_id}",
+        response_model=SCIMUserResponse,
+        deprecated=True,
+    )
+    def upsert_scim_user_legacy(
+        external_id: str,
+        payload: SCIMUserUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> SCIMUserResponse:
+        _set_deprecation_headers(response)
+        user = _upsert_scim_user(external_id, payload, request)
+        _append_audit_event(
+            request,
+            action="identity.scim.user.upsert",
+            resource_type="scim_user",
+            resource_id=user.user_id,
+            details={"external_id": user.external_id, "active": user.active, "role": user.role},
+        )
+        return user
+
+    @app.get(
+        f"{API_V1_PREFIX}/identity/scim/users",
+        response_model=SCIMUserListResponse,
+    )
+    def list_scim_users_v1(
+        request: Request,
+        active: bool | None = Query(default=None),
+    ) -> SCIMUserListResponse:
+        return _list_scim_users(request, active=active)
+
+    @app.get(
+        "/identity/scim/users",
+        response_model=SCIMUserListResponse,
+        deprecated=True,
+    )
+    def list_scim_users_legacy(
+        response: Response,
+        request: Request,
+        active: bool | None = Query(default=None),
+    ) -> SCIMUserListResponse:
+        _set_deprecation_headers(response)
+        return _list_scim_users(request, active=active)
+
+    @app.post(
+        f"{API_V1_PREFIX}/identity/scim/groups/{{external_id}}",
+        response_model=SCIMGroupResponse,
+    )
+    def upsert_scim_group_v1(
+        external_id: str,
+        payload: SCIMGroupUpsertRequest,
+        request: Request,
+    ) -> SCIMGroupResponse:
+        group = _upsert_scim_group(external_id, payload, request)
+        _append_audit_event(
+            request,
+            action="identity.scim.group.upsert",
+            resource_type="scim_group",
+            resource_id=group.group_id,
+            details={"external_id": group.external_id, "member_count": len(group.members)},
+        )
+        return group
+
+    @app.post(
+        "/identity/scim/groups/{external_id}",
+        response_model=SCIMGroupResponse,
+        deprecated=True,
+    )
+    def upsert_scim_group_legacy(
+        external_id: str,
+        payload: SCIMGroupUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> SCIMGroupResponse:
+        _set_deprecation_headers(response)
+        group = _upsert_scim_group(external_id, payload, request)
+        _append_audit_event(
+            request,
+            action="identity.scim.group.upsert",
+            resource_type="scim_group",
+            resource_id=group.group_id,
+            details={"external_id": group.external_id, "member_count": len(group.members)},
+        )
+        return group
+
+    @app.get(
+        f"{API_V1_PREFIX}/identity/scim/groups",
+        response_model=SCIMGroupListResponse,
+    )
+    def list_scim_groups_v1(request: Request) -> SCIMGroupListResponse:
+        return _list_scim_groups(request)
+
+    @app.get(
+        "/identity/scim/groups",
+        response_model=SCIMGroupListResponse,
+        deprecated=True,
+    )
+    def list_scim_groups_legacy(response: Response, request: Request) -> SCIMGroupListResponse:
+        _set_deprecation_headers(response)
+        return _list_scim_groups(request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/identity/authenticate",
+        response_model=IdentityAuthenticateResponse,
+    )
+    def authenticate_identity_v1(
+        payload: IdentityAuthenticateRequest,
+        request: Request,
+    ) -> IdentityAuthenticateResponse:
+        authn = _authenticate_identity(payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="identity_authenticate", units=1.0)
+        _publish_realtime_event(
+            event_type="identity.authentication.succeeded",
+            tenant_id=_tenant_id(request),
+            payload={
+                "provider_id": authn.provider_id,
+                "subject": authn.subject,
+                "role": authn.role,
+            },
+        )
+        return authn
+
+    @app.post(
+        "/identity/authenticate",
+        response_model=IdentityAuthenticateResponse,
+        deprecated=True,
+    )
+    def authenticate_identity_legacy(
+        payload: IdentityAuthenticateRequest,
+        response: Response,
+        request: Request,
+    ) -> IdentityAuthenticateResponse:
+        _set_deprecation_headers(response)
+        authn = _authenticate_identity(payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="identity_authenticate", units=1.0)
+        _publish_realtime_event(
+            event_type="identity.authentication.succeeded",
+            tenant_id=_tenant_id(request),
+            payload={
+                "provider_id": authn.provider_id,
+                "subject": authn.subject,
+                "role": authn.role,
+            },
+        )
+        return authn
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
