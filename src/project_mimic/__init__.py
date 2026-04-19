@@ -119,6 +119,7 @@ from .session_lifecycle import (
     SessionRegistry,
     SessionStatus,
 )
+from .synthetic_monitoring import SyntheticMonitor, SyntheticMonitoringError
 from .tasks import TaskDefinition, TaskDifficulty, TaskEvidence, grade_task, task_catalog
 from .testing import EphemeralIntegrationEnvironment, ephemeral_integration_environment
 
@@ -203,6 +204,8 @@ __all__ = [
     "SessionMetadataStore",
     "SessionServiceHandler",
     "SessionStatus",
+    "SyntheticMonitor",
+    "SyntheticMonitoringError",
     "CheckpointRecoveryError",
     "CircuitBreaker",
     "CircuitBreakerConfig",

@@ -45,6 +45,7 @@ from .policy_explorer import InMemoryPolicyDecisionStore, JsonFilePolicyDecision
 from .queue_runtime import ActionJob, InMemoryActionQueue, JsonFileQueueStore
 from .review_queue import HumanReviewQueue, InMemoryReviewQueueStore, JsonFileReviewQueueStore
 from .security import redact_sensitive_structure, redact_sensitive_text
+from .synthetic_monitoring import SyntheticMonitor
 from .orchestrator.decision_orchestrator import DecisionOrchestrator
 from .session_lifecycle import (
     InMemorySessionMetadataStore,
@@ -62,6 +63,7 @@ from .webhooks import (
     LifecycleEventWebhookPublisher,
 )
 from .vision.grounding import BBox, DOMNode, UIEntity
+from .vision.triton_client import TritonConfig, TritonVisionClient
 
 
 class APIPayloadModel(ProjectMimicModel):
@@ -788,6 +790,14 @@ def create_app() -> FastAPI:
     webhook_timeout_seconds = float(os.getenv("WEBHOOK_DELIVERY_TIMEOUT_SECONDS", "3"))
     operator_artifacts_file_path = os.getenv("OPERATOR_CONSOLE_ARTIFACTS_FILE_PATH", "")
     operator_queue_file_path = os.getenv("OPERATOR_CONSOLE_QUEUE_FILE_PATH", "")
+    synthetic_monitoring_enabled = os.getenv("SYNTHETIC_MONITORING_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    synthetic_monitoring_triton_endpoint = os.getenv("SYNTHETIC_MONITORING_TRITON_ENDPOINT", "").strip()
+    synthetic_monitoring_triton_model_name = os.getenv("SYNTHETIC_MONITORING_TRITON_MODEL", "ui-detector").strip() or "ui-detector"
 
     app.add_middleware(
         CORSMiddleware,
@@ -991,6 +1001,33 @@ def create_app() -> FastAPI:
     webhook_publisher = LifecycleEventWebhookPublisher(store=webhook_store, timeout_seconds=webhook_timeout_seconds)
     engine = ExecutionEngine(orchestrator=DecisionOrchestrator(tracer=orchestrator_tracer))
     metrics = InMemoryMetrics()
+
+    def _api_synthetic_probe() -> None:
+        # Ensure a stable core API snapshot path remains responsive.
+        _ = metrics.snapshot()
+
+    def _worker_synthetic_probe() -> None:
+        # Exercise orchestrator selection path to validate worker-like execution path.
+        _ = engine.orchestrator.select_candidate([])
+
+    synthetic_triton_client: TritonVisionClient | None = None
+    if synthetic_monitoring_triton_endpoint:
+        synthetic_triton_client = TritonVisionClient(
+            TritonConfig(
+                endpoint=synthetic_monitoring_triton_endpoint,
+                model_name=synthetic_monitoring_triton_model_name,
+                allowed_hosts=("127.0.0.1", "localhost"),
+            )
+        )
+
+    synthetic_monitor = SyntheticMonitor(
+        api_probe=_api_synthetic_probe,
+        worker_probe=_worker_synthetic_probe,
+        queue=async_job_queue,
+        triton_client=synthetic_triton_client,
+        triton_endpoint=synthetic_monitoring_triton_endpoint,
+        triton_model_name=synthetic_monitoring_triton_model_name,
+    )
     scavenger_stop = Event()
     scavenger_thread: Thread | None = None
 
@@ -1028,6 +1065,8 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/models/registry") or path.startswith("/models/registry"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/site-packs") or path.startswith("/site-packs"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/monitoring/synthetic") or path.startswith("/monitoring/synthetic"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/auth/keys") or path.startswith("/auth/keys"):
             return "admin"
@@ -4569,6 +4608,35 @@ def create_app() -> FastAPI:
             "orchestrator": orchestrator_tracer.trace_snapshot(),
         }
         return snapshot
+
+    @app.get(f"{API_V1_PREFIX}/monitoring/synthetic")
+    def run_synthetic_monitoring_v1(request: Request) -> dict[str, Any]:
+        if not synthetic_monitoring_enabled:
+            raise HTTPException(status_code=404, detail="synthetic monitoring is disabled")
+
+        report = synthetic_monitor.run_all()
+        metrics.record_feature_result(
+            "synthetic.monitoring.run",
+            success=bool(report.get("overall_healthy", False)),
+            trace_id=getattr(request.state, "request_id", None),
+            action_type="synthetic_monitoring",
+        )
+        return report
+
+    @app.get("/monitoring/synthetic", deprecated=True)
+    def run_synthetic_monitoring_legacy(response: Response, request: Request) -> dict[str, Any]:
+        _set_deprecation_headers(response)
+        if not synthetic_monitoring_enabled:
+            raise HTTPException(status_code=404, detail="synthetic monitoring is disabled")
+
+        report = synthetic_monitor.run_all()
+        metrics.record_feature_result(
+            "synthetic.monitoring.run",
+            success=bool(report.get("overall_healthy", False)),
+            trace_id=getattr(request.state, "request_id", None),
+            action_type="synthetic_monitoring",
+        )
+        return report
 
     @app.get(f"{API_V1_PREFIX}/operator")
     def get_operator_console_v1() -> HTMLResponse:
