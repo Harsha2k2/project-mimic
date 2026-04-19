@@ -15,12 +15,13 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import ConfigDict, Field
 
 from .error_mapping import map_exception_to_error
 from .audit_export import build_audit_export_sink_from_env
 from .engine import ExecutionEngine
+from .event_stream import EventStreamBroker
 from .models import Observation, ProjectMimicModel, Reward, UIAction
 from .observability import InMemoryMetrics, OpenTelemetryTracer
 from .queue_runtime import ActionJob, InMemoryActionQueue, JsonFileQueueStore
@@ -360,6 +361,7 @@ def create_app() -> FastAPI:
     async_job_queue_store_type = os.getenv("ASYNC_JOB_QUEUE_STORE", "memory").strip().lower()
     async_job_queue_file_path = os.getenv("ASYNC_JOB_QUEUE_FILE_PATH", "")
     async_job_idempotency_ttl_seconds = int(os.getenv("ASYNC_JOB_IDEMPOTENCY_TTL_SECONDS", "3600"))
+    event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
     webhook_store_type = os.getenv("WEBHOOK_SUBSCRIPTION_STORE", "memory").strip().lower()
     webhook_store_file_path = os.getenv("WEBHOOK_SUBSCRIPTION_FILE_PATH", "")
     webhook_timeout_seconds = float(os.getenv("WEBHOOK_DELIVERY_TIMEOUT_SECONDS", "3"))
@@ -481,6 +483,7 @@ def create_app() -> FastAPI:
         store=async_job_queue_store,
         idempotency_ttl_seconds=async_job_idempotency_ttl_seconds,
     )
+    event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
     orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
     audit_sink = build_audit_export_sink_from_env()
@@ -555,11 +558,66 @@ def create_app() -> FastAPI:
             "request_id": getattr(request.state, "request_id", None),
             "details": details or {},
         }
+        tenant_id = _tenant_id(request)
+        _publish_realtime_event(event_type=event_type, tenant_id=tenant_id, payload=payload)
         try:
-            webhook_publisher.emit(event_type=event_type, tenant_id=_tenant_id(request), payload=payload)
+            webhook_publisher.emit(event_type=event_type, tenant_id=tenant_id, payload=payload)
         except Exception:
             # Lifecycle operations must remain available even if webhook delivery fails.
             return
+
+    def _publish_realtime_event(
+        *,
+        event_type: str,
+        tenant_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        try:
+            event_broker.publish(event_type=event_type, tenant_id=tenant_id, payload=payload)
+        except Exception:
+            # Event streaming is best-effort and should not break primary operations.
+            return
+
+    def _format_sse_events(events: list[dict[str, Any]]) -> str:
+        if not events:
+            return ": keepalive\n\n"
+
+        chunks: list[str] = []
+        for event in events:
+            sequence = int(event.get("sequence", 0))
+            event_type = str(event.get("event_type", "message"))
+            chunks.append(f"id: {sequence}\n")
+            chunks.append(f"event: {event_type}\n")
+            chunks.append(f"data: {json.dumps(event, sort_keys=True)}\n\n")
+        return "".join(chunks)
+
+    def _build_event_stream_response(
+        *,
+        tenant_id: str,
+        after_id: int,
+        max_events: int,
+        wait_seconds: float,
+        event_type: str | None,
+    ) -> StreamingResponse:
+        events = event_broker.list_events(
+            after_id=after_id,
+            tenant_id=tenant_id,
+            max_events=max_events,
+            event_type=event_type,
+        )
+        if not events and wait_seconds > 0:
+            event_broker.wait_for_new_events(after_id=after_id, timeout_seconds=wait_seconds)
+            events = event_broker.list_events(
+                after_id=after_id,
+                tenant_id=tenant_id,
+                max_events=max_events,
+                event_type=event_type,
+            )
+
+        body = _format_sse_events(events)
+        response = StreamingResponse(iter([body]), media_type="text/event-stream")
+        response.headers["Cache-Control"] = "no-cache"
+        return response
 
     def _to_webhook_subscription_response(payload: dict[str, Any]) -> WebhookSubscriptionResponse:
         return WebhookSubscriptionResponse(
@@ -1542,6 +1600,15 @@ def create_app() -> FastAPI:
             resource_id=submitted.job.job_id,
             details={"job_type": payload.job_type},
         )
+        _publish_realtime_event(
+            event_type="async_job.submit",
+            tenant_id=_tenant_id(request),
+            payload={
+                "job_id": submitted.job.job_id,
+                "job_type": payload.job_type,
+                "status": submitted.job.status,
+            },
+        )
         return submitted
 
     @app.post("/jobs", response_model=AsyncJobSubmitResponse, deprecated=True)
@@ -1558,6 +1625,15 @@ def create_app() -> FastAPI:
             resource_type="async_job",
             resource_id=submitted.job.job_id,
             details={"job_type": payload.job_type},
+        )
+        _publish_realtime_event(
+            event_type="async_job.submit",
+            tenant_id=_tenant_id(request),
+            payload={
+                "job_id": submitted.job.job_id,
+                "job_type": payload.job_type,
+                "status": submitted.job.status,
+            },
         )
         return submitted
 
@@ -1579,6 +1655,11 @@ def create_app() -> FastAPI:
             resource_type="async_job",
             resource_id=job_id,
         )
+        _publish_realtime_event(
+            event_type="async_job.cancel",
+            tenant_id=_tenant_id(request),
+            payload={"job_id": job_id, "status": canceled.job.status},
+        )
         return canceled
 
     @app.post("/jobs/{job_id}/cancel", response_model=AsyncJobCancelResponse, deprecated=True)
@@ -1590,6 +1671,11 @@ def create_app() -> FastAPI:
             action="async_job.cancel",
             resource_type="async_job",
             resource_id=job_id,
+        )
+        _publish_realtime_event(
+            event_type="async_job.cancel",
+            tenant_id=_tenant_id(request),
+            payload={"job_id": job_id, "status": canceled.job.status},
         )
         return canceled
 
@@ -1682,6 +1768,40 @@ def create_app() -> FastAPI:
             for payload in webhook_publisher.list_subscriptions(tenant_id=_tenant_id(request))
         ]
         return WebhookSubscriptionListResponse(items=items, total=len(items))
+
+    @app.get(f"{API_V1_PREFIX}/events/stream")
+    def stream_events_v1(
+        request: Request,
+        after_id: int = Query(default=0, ge=0),
+        max_events: int = Query(default=100, ge=1, le=500),
+        wait_seconds: float = Query(default=5.0, ge=0.0, le=30.0),
+        event_type: str | None = Query(default=None, min_length=1),
+    ) -> StreamingResponse:
+        return _build_event_stream_response(
+            tenant_id=_tenant_id(request),
+            after_id=after_id,
+            max_events=max_events,
+            wait_seconds=wait_seconds,
+            event_type=event_type,
+        )
+
+    @app.get("/events/stream", deprecated=True)
+    def stream_events_legacy(
+        request: Request,
+        after_id: int = Query(default=0, ge=0),
+        max_events: int = Query(default=100, ge=1, le=500),
+        wait_seconds: float = Query(default=5.0, ge=0.0, le=30.0),
+        event_type: str | None = Query(default=None, min_length=1),
+    ) -> StreamingResponse:
+        response = _build_event_stream_response(
+            tenant_id=_tenant_id(request),
+            after_id=after_id,
+            max_events=max_events,
+            wait_seconds=wait_seconds,
+            event_type=event_type,
+        )
+        _set_deprecation_headers(response)
+        return response
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:

@@ -51,6 +51,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/35-official-python-and-typescript-sdks-for-client-integration.md`
   - `lld/36-webhook-event-subscriptions-for-session-lifecycle-events.md`
   - `lld/37-async-job-api-for-long-running-flows-submit-poll-cancel.md`
+  - `lld/38-event-stream-delivery-via-sse-for-realtime-status.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
