@@ -66,6 +66,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/50-pluggable-site-pack-packaging-and-versioning-model-for-strategies.md`
   - `lld/51-synthetic-monitoring-for-api-queue-worker-and-inference-paths.md`
   - `lld/52-cluster-level-chaos-testing-node-network-storage-faults.md`
+  - `lld/53-multi-region-active-active-control-plane-architecture.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

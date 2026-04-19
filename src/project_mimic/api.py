@@ -37,6 +37,11 @@ from .governance_controls import (
     InMemoryGovernancePolicyStore,
     JsonFileGovernancePolicyStore,
 )
+from .multi_region_control_plane import (
+    InMemoryMultiRegionControlPlaneStore,
+    JsonFileMultiRegionControlPlaneStore,
+    MultiRegionControlPlaneService,
+)
 from .model_registry import InMemoryModelRegistryStore, JsonFileModelRegistryStore, ModelRegistry
 from .site_pack_registry import InMemorySitePackRegistryStore, JsonFileSitePackRegistryStore, SitePackRegistry
 from .models import Observation, ProjectMimicModel, Reward, UIAction
@@ -540,6 +545,64 @@ class DataResidencyValidationResponse(APIPayloadModel):
     default_region: str | None = None
 
 
+class ControlPlaneRegionUpsertRequest(APIPayloadModel):
+    endpoint: str
+    traffic_weight: float = Field(default=1.0, gt=0.0)
+    write_enabled: bool = True
+    read_enabled: bool = True
+    priority: int = Field(default=100, ge=0)
+
+
+class ControlPlaneRegionResponse(APIPayloadModel):
+    region_id: str
+    endpoint: str
+    traffic_weight: float
+    write_enabled: bool
+    read_enabled: bool
+    priority: int
+    healthy: bool
+    health_reason: str | None = None
+    last_heartbeat_at: float
+    created_at: float
+    updated_at: float
+
+
+class ControlPlaneRegionListResponse(APIPayloadModel):
+    items: list[ControlPlaneRegionResponse]
+    total: int
+
+
+class ControlPlaneRegionHealthRequest(APIPayloadModel):
+    healthy: bool
+    reason: str | None = None
+
+
+class ControlPlaneRouteRequest(APIPayloadModel):
+    tenant_id: str | None = None
+    operation: str = "read"
+    preferred_region: str | None = None
+
+
+class ControlPlaneRouteResponse(APIPayloadModel):
+    tenant_id: str
+    operation: str
+    selected_region: str
+    endpoint: str
+    reason: str
+    routed_at: float
+
+
+class ControlPlaneTopologyResponse(APIPayloadModel):
+    mode: str
+    total_regions: int
+    healthy_regions: list[str] = Field(default_factory=list)
+    writable_regions: list[str] = Field(default_factory=list)
+    readable_regions: list[str] = Field(default_factory=list)
+    active_active_ready: bool
+    primary_region: str | None = None
+    updated_at: float
+
+
 class GovernancePolicyUpsertRequest(APIPayloadModel):
     consent_required: bool = False
     allowed_target_patterns: list[str] = Field(default_factory=list)
@@ -768,6 +831,8 @@ def create_app() -> FastAPI:
         "on",
     }
     data_residency_default_region = os.getenv("DATA_RESIDENCY_DEFAULT_REGION", "global").strip().lower() or "global"
+    multi_region_control_plane_store_type = os.getenv("MULTI_REGION_CONTROL_PLANE_STORE", "memory").strip().lower()
+    multi_region_control_plane_file_path = os.getenv("MULTI_REGION_CONTROL_PLANE_FILE_PATH", "")
     governance_policy_store_type = os.getenv("GOVERNANCE_POLICY_STORE", "memory").strip().lower()
     governance_policy_file_path = os.getenv("GOVERNANCE_POLICY_FILE_PATH", "")
     governance_enforcement_enabled = os.getenv("GOVERNANCE_ENFORCEMENT_ENABLED", "false").strip().lower() in {
@@ -944,6 +1009,15 @@ def create_app() -> FastAPI:
     else:
         data_residency_store = InMemoryDataResidencyStore()
 
+    if multi_region_control_plane_store_type == "file":
+        if not multi_region_control_plane_file_path:
+            raise RuntimeError(
+                "MULTI_REGION_CONTROL_PLANE_FILE_PATH is required when MULTI_REGION_CONTROL_PLANE_STORE=file"
+            )
+        multi_region_control_plane_store = JsonFileMultiRegionControlPlaneStore(multi_region_control_plane_file_path)
+    else:
+        multi_region_control_plane_store = InMemoryMultiRegionControlPlaneStore()
+
     if governance_policy_store_type == "file":
         if not governance_policy_file_path:
             raise RuntimeError("GOVERNANCE_POLICY_FILE_PATH is required when GOVERNANCE_POLICY_STORE=file")
@@ -983,6 +1057,7 @@ def create_app() -> FastAPI:
     usage_metering = TenantUsageMetering(store=usage_metering_store)
     billing = BillingPrimitives(store=billing_store)
     data_residency = TenantDataResidencyPolicyService(store=data_residency_store)
+    multi_region_control_plane = MultiRegionControlPlaneService(store=multi_region_control_plane_store)
     governance_controls = ConsentTargetGovernanceService(store=governance_policy_store)
     drift_monitor = DriftMonitor(
         baseline_window=drift_baseline_window,
@@ -1055,6 +1130,12 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/data-residency/validate") or path.startswith("/data-residency/validate"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/data-residency") or path.startswith("/data-residency"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/control-plane/route") or path.startswith("/control-plane/route"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/control-plane/topology") or path.startswith("/control-plane/topology"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/control-plane") or path.startswith("/control-plane"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -1723,6 +1804,115 @@ def create_app() -> FastAPI:
                 if payload.get("default_region") in {None, ""}
                 else str(payload.get("default_region"))
             ),
+        )
+
+    def _to_control_plane_region_response(payload: dict[str, Any]) -> ControlPlaneRegionResponse:
+        return ControlPlaneRegionResponse(
+            region_id=str(payload.get("region_id", "")),
+            endpoint=str(payload.get("endpoint", "")),
+            traffic_weight=float(payload.get("traffic_weight", 1.0)),
+            write_enabled=bool(payload.get("write_enabled", True)),
+            read_enabled=bool(payload.get("read_enabled", True)),
+            priority=int(payload.get("priority", 100)),
+            healthy=bool(payload.get("healthy", True)),
+            health_reason=(
+                None
+                if payload.get("health_reason") in {None, ""}
+                else str(payload.get("health_reason"))
+            ),
+            last_heartbeat_at=float(payload.get("last_heartbeat_at", 0.0)),
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _upsert_control_plane_region(
+        region_id: str,
+        payload: ControlPlaneRegionUpsertRequest,
+    ) -> ControlPlaneRegionResponse:
+        try:
+            region = multi_region_control_plane.upsert_region(
+                region_id=region_id,
+                endpoint=payload.endpoint,
+                traffic_weight=payload.traffic_weight,
+                write_enabled=payload.write_enabled,
+                read_enabled=payload.read_enabled,
+                priority=payload.priority,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_control_plane_region_response(region)
+
+    def _get_control_plane_region(region_id: str) -> ControlPlaneRegionResponse:
+        try:
+            region = multi_region_control_plane.get_region(region_id=region_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="control plane region not found") from exc
+        return _to_control_plane_region_response(region)
+
+    def _list_control_plane_regions() -> ControlPlaneRegionListResponse:
+        items = [
+            _to_control_plane_region_response(item)
+            for item in multi_region_control_plane.list_regions()
+        ]
+        return ControlPlaneRegionListResponse(items=items, total=len(items))
+
+    def _update_control_plane_region_health(
+        region_id: str,
+        payload: ControlPlaneRegionHealthRequest,
+    ) -> ControlPlaneRegionResponse:
+        try:
+            region = multi_region_control_plane.update_health(
+                region_id=region_id,
+                healthy=payload.healthy,
+                reason=payload.reason,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="control plane region not found") from exc
+        return _to_control_plane_region_response(region)
+
+    def _control_plane_topology() -> ControlPlaneTopologyResponse:
+        payload = multi_region_control_plane.topology_snapshot()
+        return ControlPlaneTopologyResponse(
+            mode=str(payload.get("mode", "active-active")),
+            total_regions=int(payload.get("total_regions", 0)),
+            healthy_regions=[str(item) for item in payload.get("healthy_regions", []) if isinstance(item, str)],
+            writable_regions=[str(item) for item in payload.get("writable_regions", []) if isinstance(item, str)],
+            readable_regions=[str(item) for item in payload.get("readable_regions", []) if isinstance(item, str)],
+            active_active_ready=bool(payload.get("active_active_ready", False)),
+            primary_region=(
+                None
+                if payload.get("primary_region") in {None, ""}
+                else str(payload.get("primary_region"))
+            ),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _route_control_plane(
+        payload: ControlPlaneRouteRequest,
+        request: Request,
+    ) -> ControlPlaneRouteResponse:
+        caller_tenant = _tenant_id(request)
+        requested_tenant = payload.tenant_id.strip() if payload.tenant_id is not None else ""
+        if requested_tenant and requested_tenant != caller_tenant:
+            raise HTTPException(status_code=403, detail="tenant override does not match caller scope")
+
+        resolved_tenant = requested_tenant or caller_tenant
+        try:
+            routed = multi_region_control_plane.route(
+                tenant_id=resolved_tenant,
+                operation=payload.operation,
+                preferred_region=payload.preferred_region,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return ControlPlaneRouteResponse(
+            tenant_id=str(routed.get("tenant_id", resolved_tenant)),
+            operation=str(routed.get("operation", payload.operation)),
+            selected_region=str(routed.get("selected_region", "")),
+            endpoint=str(routed.get("endpoint", "")),
+            reason=str(routed.get("reason", "weighted_active_active_routing")),
+            routed_at=float(routed.get("routed_at", time.time())),
         )
 
     def _data_residency_enforcement_response(request: Request, request_id: str, tenant_id: str) -> JSONResponse | None:
@@ -4007,6 +4197,149 @@ def create_app() -> FastAPI:
     def get_data_residency_policy_legacy(tenant_id: str, response: Response) -> DataResidencyPolicyResponse:
         _set_deprecation_headers(response)
         return _get_data_residency_policy(tenant_id)
+
+    @app.post(f"{API_V1_PREFIX}/control-plane/regions/{{region_id}}", response_model=ControlPlaneRegionResponse)
+    def upsert_control_plane_region_v1(
+        region_id: str,
+        payload: ControlPlaneRegionUpsertRequest,
+        request: Request,
+    ) -> ControlPlaneRegionResponse:
+        region = _upsert_control_plane_region(region_id, payload)
+        _append_audit_event(
+            request,
+            action="control_plane.region.upsert",
+            resource_type="control_plane_region",
+            resource_id=region.region_id,
+            details={
+                "endpoint": region.endpoint,
+                "traffic_weight": region.traffic_weight,
+                "write_enabled": region.write_enabled,
+                "read_enabled": region.read_enabled,
+            },
+        )
+        return region
+
+    @app.post("/control-plane/regions/{region_id}", response_model=ControlPlaneRegionResponse, deprecated=True)
+    def upsert_control_plane_region_legacy(
+        region_id: str,
+        payload: ControlPlaneRegionUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> ControlPlaneRegionResponse:
+        _set_deprecation_headers(response)
+        region = _upsert_control_plane_region(region_id, payload)
+        _append_audit_event(
+            request,
+            action="control_plane.region.upsert",
+            resource_type="control_plane_region",
+            resource_id=region.region_id,
+            details={
+                "endpoint": region.endpoint,
+                "traffic_weight": region.traffic_weight,
+                "write_enabled": region.write_enabled,
+                "read_enabled": region.read_enabled,
+            },
+        )
+        return region
+
+    @app.get(f"{API_V1_PREFIX}/control-plane/regions", response_model=ControlPlaneRegionListResponse)
+    def list_control_plane_regions_v1() -> ControlPlaneRegionListResponse:
+        return _list_control_plane_regions()
+
+    @app.get("/control-plane/regions", response_model=ControlPlaneRegionListResponse, deprecated=True)
+    def list_control_plane_regions_legacy(response: Response) -> ControlPlaneRegionListResponse:
+        _set_deprecation_headers(response)
+        return _list_control_plane_regions()
+
+    @app.get(f"{API_V1_PREFIX}/control-plane/regions/{{region_id}}", response_model=ControlPlaneRegionResponse)
+    def get_control_plane_region_v1(region_id: str) -> ControlPlaneRegionResponse:
+        return _get_control_plane_region(region_id)
+
+    @app.get("/control-plane/regions/{region_id}", response_model=ControlPlaneRegionResponse, deprecated=True)
+    def get_control_plane_region_legacy(region_id: str, response: Response) -> ControlPlaneRegionResponse:
+        _set_deprecation_headers(response)
+        return _get_control_plane_region(region_id)
+
+    @app.post(
+        f"{API_V1_PREFIX}/control-plane/regions/{{region_id}}/health",
+        response_model=ControlPlaneRegionResponse,
+    )
+    def update_control_plane_region_health_v1(
+        region_id: str,
+        payload: ControlPlaneRegionHealthRequest,
+        request: Request,
+    ) -> ControlPlaneRegionResponse:
+        region = _update_control_plane_region_health(region_id, payload)
+        _append_audit_event(
+            request,
+            action="control_plane.region.health.update",
+            resource_type="control_plane_region",
+            resource_id=region.region_id,
+            details={"healthy": region.healthy, "health_reason": region.health_reason},
+        )
+        return region
+
+    @app.post(
+        "/control-plane/regions/{region_id}/health",
+        response_model=ControlPlaneRegionResponse,
+        deprecated=True,
+    )
+    def update_control_plane_region_health_legacy(
+        region_id: str,
+        payload: ControlPlaneRegionHealthRequest,
+        response: Response,
+        request: Request,
+    ) -> ControlPlaneRegionResponse:
+        _set_deprecation_headers(response)
+        region = _update_control_plane_region_health(region_id, payload)
+        _append_audit_event(
+            request,
+            action="control_plane.region.health.update",
+            resource_type="control_plane_region",
+            resource_id=region.region_id,
+            details={"healthy": region.healthy, "health_reason": region.health_reason},
+        )
+        return region
+
+    @app.get(f"{API_V1_PREFIX}/control-plane/topology", response_model=ControlPlaneTopologyResponse)
+    def control_plane_topology_v1() -> ControlPlaneTopologyResponse:
+        return _control_plane_topology()
+
+    @app.get("/control-plane/topology", response_model=ControlPlaneTopologyResponse, deprecated=True)
+    def control_plane_topology_legacy(response: Response) -> ControlPlaneTopologyResponse:
+        _set_deprecation_headers(response)
+        return _control_plane_topology()
+
+    @app.post(f"{API_V1_PREFIX}/control-plane/route", response_model=ControlPlaneRouteResponse)
+    def route_control_plane_v1(payload: ControlPlaneRouteRequest, request: Request) -> ControlPlaneRouteResponse:
+        routed = _route_control_plane(payload, request)
+        _record_usage_metering(tenant_id=routed.tenant_id, dimension="control_plane_route", units=1.0)
+        _append_audit_event(
+            request,
+            action="control_plane.route.evaluate",
+            resource_type="control_plane_route",
+            resource_id=routed.selected_region,
+            details={"operation": routed.operation, "reason": routed.reason},
+        )
+        return routed
+
+    @app.post("/control-plane/route", response_model=ControlPlaneRouteResponse, deprecated=True)
+    def route_control_plane_legacy(
+        payload: ControlPlaneRouteRequest,
+        response: Response,
+        request: Request,
+    ) -> ControlPlaneRouteResponse:
+        _set_deprecation_headers(response)
+        routed = _route_control_plane(payload, request)
+        _record_usage_metering(tenant_id=routed.tenant_id, dimension="control_plane_route", units=1.0)
+        _append_audit_event(
+            request,
+            action="control_plane.route.evaluate",
+            resource_type="control_plane_route",
+            resource_id=routed.selected_region,
+            details={"operation": routed.operation, "reason": routed.reason},
+        )
+        return routed
 
     @app.post(f"{API_V1_PREFIX}/governance/policies/{{tenant_id}}", response_model=GovernancePolicyResponse)
     def upsert_governance_policy_v1(

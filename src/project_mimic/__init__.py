@@ -22,6 +22,11 @@ from .audit_export import (
 )
 from .benchmarking import BenchmarkReport, BenchmarkTaskResult, run_benchmark
 from .cluster_chaos import ChaosScenario, ClusterChaosTestSuite, REQUIRED_FAULT_CLASSES
+from .multi_region_control_plane import (
+    InMemoryMultiRegionControlPlaneStore,
+    JsonFileMultiRegionControlPlaneStore,
+    MultiRegionControlPlaneService,
+)
 from .engine import ClickDecision, ExecutionEngine
 from .determinism import get_global_seed, resolve_seed, set_global_seed
 from .error_mapping import ErrorEnvelope, map_exception_to_error
@@ -155,6 +160,9 @@ __all__ = [
     "ChaosScenario",
     "ClusterChaosTestSuite",
     "REQUIRED_FAULT_CLASSES",
+    "InMemoryMultiRegionControlPlaneStore",
+    "JsonFileMultiRegionControlPlaneStore",
+    "MultiRegionControlPlaneService",
     "ErrorEnvelope",
     "ExecutionEngine",
     "GroundActionRequest",
