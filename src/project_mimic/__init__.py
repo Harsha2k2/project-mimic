@@ -33,6 +33,11 @@ from .cost_aware_scheduler import (
     InMemoryCostAwareSchedulerStore,
     JsonFileCostAwareSchedulerStore,
 )
+from .cost_observability import (
+    CostObservabilityService,
+    InMemoryCostObservabilityStore,
+    JsonFileCostObservabilityStore,
+)
 from .multi_region_control_plane import (
     InMemoryMultiRegionControlPlaneStore,
     JsonFileMultiRegionControlPlaneStore,
@@ -365,6 +370,9 @@ __all__ = [
     "GovernanceApprovalWorkflowService",
     "InMemoryGovernanceApprovalStore",
     "JsonFileGovernanceApprovalStore",
+    "CostObservabilityService",
+    "InMemoryCostObservabilityStore",
+    "JsonFileCostObservabilityStore",
     "InMemoryWorkflowMarketplaceStore",
     "JsonFileWorkflowMarketplaceStore",
     "WorkflowMarketplaceService",

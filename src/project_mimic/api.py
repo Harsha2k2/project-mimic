@@ -34,6 +34,11 @@ from .cost_aware_scheduler import (
     InMemoryCostAwareSchedulerStore,
     JsonFileCostAwareSchedulerStore,
 )
+from .cost_observability import (
+    CostObservabilityService,
+    InMemoryCostObservabilityStore,
+    JsonFileCostObservabilityStore,
+)
 from .data_residency import (
     InMemoryDataResidencyStore,
     JsonFileDataResidencyStore,
@@ -1688,6 +1693,45 @@ class GovernanceApprovalRequestListResponse(APIPayloadModel):
     total: int
 
 
+class CostSnapshotUpsertRequest(APIPayloadModel):
+    period_start_day: int
+    period_end_day: int
+    gpu_hours: float = Field(ge=0.0)
+    queue_compute_hours: float = Field(ge=0.0)
+    storage_gb_month: float = Field(ge=0.0)
+    egress_gb: float = Field(ge=0.0)
+    rates: dict[str, float] = Field(default_factory=dict)
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class CostSnapshotResponse(APIPayloadModel):
+    snapshot_id: str
+    tenant_id: str
+    period_start_day: int
+    period_end_day: int
+    usage: dict[str, float] = Field(default_factory=dict)
+    rates: dict[str, float] = Field(default_factory=dict)
+    cost_breakdown: dict[str, float] = Field(default_factory=dict)
+    total_cost: float
+    trend_vs_previous: dict[str, float] = Field(default_factory=dict)
+    metadata: dict[str, str] = Field(default_factory=dict)
+    updated_at: float
+
+
+class CostSnapshotListResponse(APIPayloadModel):
+    items: list[CostSnapshotResponse]
+    total: int
+
+
+class CostDashboardResponse(APIPayloadModel):
+    tenant_id: str
+    snapshot_count: int
+    totals: dict[str, float] = Field(default_factory=dict)
+    latest_total_cost: float
+    trend_total_cost: float
+    latest_snapshot: CostSnapshotResponse | None = None
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1815,6 +1859,8 @@ def create_app() -> FastAPI:
     release_readiness_file_path = os.getenv("RELEASE_READINESS_FILE_PATH", "")
     governance_approval_store_type = os.getenv("GOVERNANCE_APPROVAL_STORE", "memory").strip().lower()
     governance_approval_file_path = os.getenv("GOVERNANCE_APPROVAL_FILE_PATH", "")
+    cost_observability_store_type = os.getenv("COST_OBSERVABILITY_STORE", "memory").strip().lower()
+    cost_observability_file_path = os.getenv("COST_OBSERVABILITY_FILE_PATH", "")
     review_queue_store_type = os.getenv("REVIEW_QUEUE_STORE", "memory").strip().lower()
     review_queue_file_path = os.getenv("REVIEW_QUEUE_FILE_PATH", "")
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
@@ -2095,6 +2141,13 @@ def create_app() -> FastAPI:
     else:
         governance_approval_store = InMemoryGovernanceApprovalStore()
 
+    if cost_observability_store_type == "file":
+        if not cost_observability_file_path:
+            raise RuntimeError("COST_OBSERVABILITY_FILE_PATH is required when COST_OBSERVABILITY_STORE=file")
+        cost_observability_store = JsonFileCostObservabilityStore(cost_observability_file_path)
+    else:
+        cost_observability_store = InMemoryCostObservabilityStore()
+
     if review_queue_store_type == "file":
         if not review_queue_file_path:
             raise RuntimeError("REVIEW_QUEUE_FILE_PATH is required when REVIEW_QUEUE_STORE=file")
@@ -2245,6 +2298,7 @@ def create_app() -> FastAPI:
     benchmark_lab = BenchmarkLabService(store=benchmark_lab_store)
     release_readiness = ReleaseReadinessService(store=release_readiness_store)
     governance_approval = GovernanceApprovalWorkflowService(store=governance_approval_store)
+    cost_observability = CostObservabilityService(store=cost_observability_store)
     review_queue = HumanReviewQueue(store=review_queue_store)
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
@@ -2395,6 +2449,8 @@ def create_app() -> FastAPI:
                 return "operator"
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/governance/approvals") or path.startswith("/governance/approvals"):
+            return "operator"
+        if path.startswith(f"{API_V1_PREFIX}/cost/observability") or path.startswith("/cost/observability"):
             return "operator"
         if path.startswith(f"{API_V1_PREFIX}/governance/evaluate") or path.startswith("/governance/evaluate"):
             return "operator"
@@ -5604,6 +5660,104 @@ def create_app() -> FastAPI:
 
         responses = [_to_governance_approval_response(item) for item in items]
         return GovernanceApprovalRequestListResponse(items=responses, total=len(responses))
+
+    def _to_cost_snapshot_response(payload: dict[str, Any]) -> CostSnapshotResponse:
+        return CostSnapshotResponse(
+            snapshot_id=str(payload.get("snapshot_id", "")),
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            period_start_day=int(payload.get("period_start_day", 0)),
+            period_end_day=int(payload.get("period_end_day", 0)),
+            usage={
+                str(key): float(value)
+                for key, value in dict(payload.get("usage", {})).items()
+            },
+            rates={
+                str(key): float(value)
+                for key, value in dict(payload.get("rates", {})).items()
+            },
+            cost_breakdown={
+                str(key): float(value)
+                for key, value in dict(payload.get("cost_breakdown", {})).items()
+            },
+            total_cost=float(payload.get("total_cost", 0.0)),
+            trend_vs_previous={
+                str(key): float(value)
+                for key, value in dict(payload.get("trend_vs_previous", {})).items()
+            },
+            metadata={
+                str(key): str(value)
+                for key, value in dict(payload.get("metadata", {})).items()
+            },
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _record_cost_snapshot(
+        snapshot_id: str,
+        payload: CostSnapshotUpsertRequest,
+        request: Request,
+    ) -> CostSnapshotResponse:
+        try:
+            snapshot = cost_observability.record_snapshot(
+                tenant_id=_tenant_id(request),
+                snapshot_id=snapshot_id,
+                period_start_day=payload.period_start_day,
+                period_end_day=payload.period_end_day,
+                gpu_hours=payload.gpu_hours,
+                queue_compute_hours=payload.queue_compute_hours,
+                storage_gb_month=payload.storage_gb_month,
+                egress_gb=payload.egress_gb,
+                rates=payload.rates,
+                metadata=payload.metadata,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        return _to_cost_snapshot_response(snapshot)
+
+    def _get_cost_snapshot(snapshot_id: str, request: Request) -> CostSnapshotResponse:
+        try:
+            snapshot = cost_observability.get_snapshot(
+                tenant_id=_tenant_id(request),
+                snapshot_id=snapshot_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        if snapshot is None:
+            raise HTTPException(status_code=404, detail="cost snapshot not found")
+        return _to_cost_snapshot_response(snapshot)
+
+    def _list_cost_snapshots(request: Request, limit: int) -> CostSnapshotListResponse:
+        try:
+            snapshots = cost_observability.list_snapshots(tenant_id=_tenant_id(request), limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        items = [_to_cost_snapshot_response(item) for item in snapshots]
+        return CostSnapshotListResponse(items=items, total=len(items))
+
+    def _get_cost_dashboard(request: Request, lookback: int) -> CostDashboardResponse:
+        try:
+            dashboard = cost_observability.get_dashboard(tenant_id=_tenant_id(request), lookback=lookback)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        latest_snapshot_payload = dashboard.get("latest_snapshot")
+        latest_snapshot: CostSnapshotResponse | None = None
+        if isinstance(latest_snapshot_payload, dict):
+            latest_snapshot = _to_cost_snapshot_response(latest_snapshot_payload)
+
+        return CostDashboardResponse(
+            tenant_id=str(dashboard.get("tenant_id", default_tenant)),
+            snapshot_count=int(dashboard.get("snapshot_count", 0)),
+            totals={
+                str(key): float(value)
+                for key, value in dict(dashboard.get("totals", {})).items()
+            },
+            latest_total_cost=float(dashboard.get("latest_total_cost", 0.0)),
+            trend_total_cost=float(dashboard.get("trend_total_cost", 0.0)),
+            latest_snapshot=latest_snapshot,
+        )
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -10883,6 +11037,128 @@ def create_app() -> FastAPI:
     ) -> GovernanceApprovalRequestResponse:
         _set_deprecation_headers(response)
         return _get_governance_approval_request(request_id, request)
+
+    @app.post(
+        f"{API_V1_PREFIX}/cost/observability/snapshots/{{snapshot_id}}",
+        response_model=CostSnapshotResponse,
+    )
+    def record_cost_snapshot_v1(
+        snapshot_id: str,
+        payload: CostSnapshotUpsertRequest,
+        request: Request,
+    ) -> CostSnapshotResponse:
+        snapshot = _record_cost_snapshot(snapshot_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="cost_observability_snapshot", units=1.0)
+        _append_audit_event(
+            request,
+            action="cost.observability.snapshot.record",
+            resource_type="cost_snapshot",
+            resource_id=snapshot.snapshot_id,
+            details={"total_cost": snapshot.total_cost},
+        )
+        _publish_realtime_event(
+            event_type="cost.observability.snapshot.recorded",
+            tenant_id=_tenant_id(request),
+            payload={"snapshot_id": snapshot.snapshot_id, "total_cost": snapshot.total_cost},
+        )
+        return snapshot
+
+    @app.post(
+        "/cost/observability/snapshots/{snapshot_id}",
+        response_model=CostSnapshotResponse,
+        deprecated=True,
+    )
+    def record_cost_snapshot_legacy(
+        snapshot_id: str,
+        payload: CostSnapshotUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> CostSnapshotResponse:
+        _set_deprecation_headers(response)
+        snapshot = _record_cost_snapshot(snapshot_id, payload, request)
+        _record_usage_metering(tenant_id=_tenant_id(request), dimension="cost_observability_snapshot", units=1.0)
+        _append_audit_event(
+            request,
+            action="cost.observability.snapshot.record",
+            resource_type="cost_snapshot",
+            resource_id=snapshot.snapshot_id,
+            details={"total_cost": snapshot.total_cost},
+        )
+        _publish_realtime_event(
+            event_type="cost.observability.snapshot.recorded",
+            tenant_id=_tenant_id(request),
+            payload={"snapshot_id": snapshot.snapshot_id, "total_cost": snapshot.total_cost},
+        )
+        return snapshot
+
+    @app.get(
+        f"{API_V1_PREFIX}/cost/observability/snapshots",
+        response_model=CostSnapshotListResponse,
+    )
+    def list_cost_snapshots_v1(
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> CostSnapshotListResponse:
+        return _list_cost_snapshots(request, limit)
+
+    @app.get(
+        "/cost/observability/snapshots",
+        response_model=CostSnapshotListResponse,
+        deprecated=True,
+    )
+    def list_cost_snapshots_legacy(
+        response: Response,
+        request: Request,
+        limit: int = Query(default=50, ge=1, le=500),
+    ) -> CostSnapshotListResponse:
+        _set_deprecation_headers(response)
+        return _list_cost_snapshots(request, limit)
+
+    @app.get(
+        f"{API_V1_PREFIX}/cost/observability/snapshots/{{snapshot_id}}",
+        response_model=CostSnapshotResponse,
+    )
+    def get_cost_snapshot_v1(
+        snapshot_id: str,
+        request: Request,
+    ) -> CostSnapshotResponse:
+        return _get_cost_snapshot(snapshot_id, request)
+
+    @app.get(
+        "/cost/observability/snapshots/{snapshot_id}",
+        response_model=CostSnapshotResponse,
+        deprecated=True,
+    )
+    def get_cost_snapshot_legacy(
+        snapshot_id: str,
+        response: Response,
+        request: Request,
+    ) -> CostSnapshotResponse:
+        _set_deprecation_headers(response)
+        return _get_cost_snapshot(snapshot_id, request)
+
+    @app.get(
+        f"{API_V1_PREFIX}/cost/observability/dashboard",
+        response_model=CostDashboardResponse,
+    )
+    def get_cost_dashboard_v1(
+        request: Request,
+        lookback: int = Query(default=12, ge=1, le=120),
+    ) -> CostDashboardResponse:
+        return _get_cost_dashboard(request, lookback)
+
+    @app.get(
+        "/cost/observability/dashboard",
+        response_model=CostDashboardResponse,
+        deprecated=True,
+    )
+    def get_cost_dashboard_legacy(
+        response: Response,
+        request: Request,
+        lookback: int = Query(default=12, ge=1, le=120),
+    ) -> CostDashboardResponse:
+        _set_deprecation_headers(response)
+        return _get_cost_dashboard(request, lookback)
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:

@@ -75,5 +75,5 @@ Execution rule for this backlog:
 57. [x] Add benchmark lab with reproducible cross-version comparisons.
 58. [x] Add release readiness scorecard auto-generated from CI evidence.
 59. [x] Add governance approval workflows for high-risk policy changes.
-60. [ ] Add full cost observability dashboard (GPU, queue, storage, egress).
+60. [x] Add full cost observability dashboard (GPU, queue, storage, egress).
     
