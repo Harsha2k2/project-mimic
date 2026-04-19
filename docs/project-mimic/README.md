@@ -48,6 +48,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/32-compliance-safe-data-deletion-workflows.md`
   - `lld/33-operator-web-console-for-sessions-traces-artifacts-and-queue-state.md`
   - `lld/34-cli-for-operational-workflows-restore-rollback-replay-quarantine.md`
+  - `lld/35-official-python-and-typescript-sdks-for-client-integration.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

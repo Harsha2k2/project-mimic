@@ -14,6 +14,7 @@ venv/
 build/
 dist/
 *.egg-info/
+node_modules/
 
 # Rust
 target/
