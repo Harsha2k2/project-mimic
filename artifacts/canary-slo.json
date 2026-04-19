@@ -1,0 +1,8 @@
+{
+  "error_rate": 0.0,
+  "p95_latency_ms": 0.0,
+  "min_success_rate": 0.98,
+  "max_p95_latency_ms": 700,
+  "canary_namespace": "project-mimic",
+  "canary_deployment": "mimic-control-plane-canary"
+}

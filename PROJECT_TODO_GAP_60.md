@@ -27,7 +27,7 @@ Execution rule for this backlog:
 15. [x] Add signed container images and verification policy.
 16. [x] Add secret rotation automation with expiry alarms.
 17. [x] Add disaster recovery backup and restore automation and validation.
-18. [ ] Add canary deployment with automatic rollback on SLO breach.
+18. [x] Add canary deployment with automatic rollback on SLO breach.
 19. [ ] Add deployment pipeline gates for Helm and manifest policy checks.
 20. [ ] Add end-to-end tests with real browser workers in CI.
 21. [ ] Add integration lane with real Triton/GPU inference path.

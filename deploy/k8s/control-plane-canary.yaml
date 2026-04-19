@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mimic-control-plane-canary
+  namespace: project-mimic
+  labels:
+    app: mimic-control-plane
+    track: canary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mimic-control-plane
+      track: canary
+  template:
+    metadata:
+      labels:
+        app: mimic-control-plane
+        track: canary
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/harsha2k2/project-mimic-api:canary
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: LOG_LEVEL
+              value: info

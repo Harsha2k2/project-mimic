@@ -38,6 +38,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/22-signed-container-images-and-verification-policy.md`
   - `lld/23-secret-rotation-automation-with-expiry-alarms.md`
   - `lld/24-disaster-recovery-backup-and-restore-automation.md`
+  - `lld/25-canary-deployment-with-automatic-rollback-on-slo-breach.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
