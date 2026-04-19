@@ -1,0 +1,4 @@
+min_average_score: 0.99
+max_task_elapsed_ms: 1000
+max_average_elapsed_ms: 500
+deterministic_seed: 42
