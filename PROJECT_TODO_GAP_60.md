@@ -45,7 +45,7 @@ Execution rule for this backlog:
 30. [x] Add async job API for long-running flows (submit, poll, cancel).
 31. [x] Add event stream delivery (SSE or message bus) for realtime status.
 32. [x] Add model registry with rollout channels (dev, canary, prod).
-33. [ ] Add online model/grounding drift detection and threshold alerts.
+33. [x] Add online model/grounding drift detection and threshold alerts.
 34. [ ] Add human-in-the-loop review queue for low-confidence actions.
 35. [ ] Add policy decision explorer UI with explanation trails.
 36. [ ] Add feature flag service for safe progressive rollout.

@@ -20,6 +20,7 @@ from pydantic import ConfigDict, Field
 
 from .error_mapping import map_exception_to_error
 from .audit_export import build_audit_export_sink_from_env
+from .drift_detection import DriftMonitor
 from .engine import ExecutionEngine
 from .event_stream import EventStreamBroker
 from .model_registry import InMemoryModelRegistryStore, JsonFileModelRegistryStore, ModelRegistry
@@ -334,6 +335,31 @@ class ModelChannelListResponse(APIPayloadModel):
     channels: dict[str, dict[str, Any] | None]
 
 
+class DriftSampleRequest(APIPayloadModel):
+    stream_id: str
+    metric_name: str
+    value: float
+    threshold: float | None = None
+
+
+class DriftStatusResponse(APIPayloadModel):
+    stream_id: str
+    metric_name: str
+    baseline_mean: float
+    baseline_samples: int
+    recent_mean: float | None = None
+    recent_sample_count: int
+    drift_score: float
+    threshold: float
+    alert_active: bool
+    updated_at: float
+
+
+class DriftAlertListResponse(APIPayloadModel):
+    items: list[DriftStatusResponse]
+    total: int
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -389,6 +415,9 @@ def create_app() -> FastAPI:
     async_job_idempotency_ttl_seconds = int(os.getenv("ASYNC_JOB_IDEMPOTENCY_TTL_SECONDS", "3600"))
     model_registry_store_type = os.getenv("MODEL_REGISTRY_STORE", "memory").strip().lower()
     model_registry_file_path = os.getenv("MODEL_REGISTRY_FILE_PATH", "")
+    drift_baseline_window = int(os.getenv("DRIFT_BASELINE_WINDOW", "20"))
+    drift_recent_window = int(os.getenv("DRIFT_RECENT_WINDOW", "10"))
+    drift_default_threshold = float(os.getenv("DRIFT_DEFAULT_THRESHOLD", "0.25"))
     event_stream_max_events = int(os.getenv("EVENT_STREAM_MAX_EVENTS", "1000"))
     webhook_store_type = os.getenv("WEBHOOK_SUBSCRIPTION_STORE", "memory").strip().lower()
     webhook_store_file_path = os.getenv("WEBHOOK_SUBSCRIPTION_FILE_PATH", "")
@@ -519,6 +548,11 @@ def create_app() -> FastAPI:
         idempotency_ttl_seconds=async_job_idempotency_ttl_seconds,
     )
     model_registry = ModelRegistry(store=model_registry_store)
+    drift_monitor = DriftMonitor(
+        baseline_window=drift_baseline_window,
+        recent_window=drift_recent_window,
+        default_threshold=drift_default_threshold,
+    )
     event_broker = EventStreamBroker(max_events=event_stream_max_events)
     api_tracer = OpenTelemetryTracer(component="api")
     orchestrator_tracer = OpenTelemetryTracer(component="orchestrator")
@@ -741,6 +775,46 @@ def create_app() -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return ModelPromotionResponse(assignment=assignment)
+
+    def _to_drift_status_response(payload: dict[str, Any]) -> DriftStatusResponse:
+        return DriftStatusResponse(
+            stream_id=str(payload.get("stream_id", "")),
+            metric_name=str(payload.get("metric_name", "")),
+            baseline_mean=float(payload.get("baseline_mean", 0.0)),
+            baseline_samples=int(payload.get("baseline_samples", 0)),
+            recent_mean=(
+                None
+                if payload.get("recent_mean") is None
+                else float(payload.get("recent_mean"))
+            ),
+            recent_sample_count=int(payload.get("recent_sample_count", 0)),
+            drift_score=float(payload.get("drift_score", 0.0)),
+            threshold=float(payload.get("threshold", drift_default_threshold)),
+            alert_active=bool(payload.get("alert_active", False)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _record_drift_sample(payload: DriftSampleRequest) -> DriftStatusResponse:
+        try:
+            status = drift_monitor.ingest(
+                stream_id=payload.stream_id,
+                metric_name=payload.metric_name,
+                value=payload.value,
+                threshold=payload.threshold,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_drift_status_response(status)
+
+    def _drift_status(stream_id: str, metric_name: str) -> DriftStatusResponse:
+        status = drift_monitor.status(stream_id=stream_id, metric_name=metric_name)
+        if status is None:
+            raise HTTPException(status_code=404, detail="drift metric not found")
+        return _to_drift_status_response(status)
+
+    def _list_drift_alerts() -> DriftAlertListResponse:
+        items = [_to_drift_status_response(payload) for payload in drift_monitor.active_alerts()]
+        return DriftAlertListResponse(items=items, total=len(items))
 
     def _load_optional_json_file(file_path: str) -> Any:
         path_text = file_path.strip()
@@ -1953,6 +2027,80 @@ def create_app() -> FastAPI:
     def list_model_channels_legacy(response: Response) -> ModelChannelListResponse:
         _set_deprecation_headers(response)
         return ModelChannelListResponse(channels=model_registry.list_channels())
+
+    @app.post(f"{API_V1_PREFIX}/drift/samples", response_model=DriftStatusResponse)
+    def ingest_drift_sample_v1(payload: DriftSampleRequest, request: Request) -> DriftStatusResponse:
+        status = _record_drift_sample(payload)
+        _append_audit_event(
+            request,
+            action="drift.sample.ingest",
+            resource_type="drift_metric",
+            resource_id=f"{payload.stream_id}::{payload.metric_name}",
+        )
+        if status.alert_active:
+            _publish_realtime_event(
+                event_type="drift.alert",
+                tenant_id=_tenant_id(request),
+                payload={
+                    "stream_id": status.stream_id,
+                    "metric_name": status.metric_name,
+                    "drift_score": status.drift_score,
+                    "threshold": status.threshold,
+                },
+            )
+        return status
+
+    @app.post("/drift/samples", response_model=DriftStatusResponse, deprecated=True)
+    def ingest_drift_sample_legacy(
+        payload: DriftSampleRequest,
+        response: Response,
+        request: Request,
+    ) -> DriftStatusResponse:
+        _set_deprecation_headers(response)
+        status = _record_drift_sample(payload)
+        _append_audit_event(
+            request,
+            action="drift.sample.ingest",
+            resource_type="drift_metric",
+            resource_id=f"{payload.stream_id}::{payload.metric_name}",
+        )
+        if status.alert_active:
+            _publish_realtime_event(
+                event_type="drift.alert",
+                tenant_id=_tenant_id(request),
+                payload={
+                    "stream_id": status.stream_id,
+                    "metric_name": status.metric_name,
+                    "drift_score": status.drift_score,
+                    "threshold": status.threshold,
+                },
+            )
+        return status
+
+    @app.get(f"{API_V1_PREFIX}/drift/status", response_model=DriftStatusResponse)
+    def drift_status_v1(
+        stream_id: str = Query(..., min_length=1),
+        metric_name: str = Query(..., min_length=1),
+    ) -> DriftStatusResponse:
+        return _drift_status(stream_id, metric_name)
+
+    @app.get("/drift/status", response_model=DriftStatusResponse, deprecated=True)
+    def drift_status_legacy(
+        response: Response,
+        stream_id: str = Query(..., min_length=1),
+        metric_name: str = Query(..., min_length=1),
+    ) -> DriftStatusResponse:
+        _set_deprecation_headers(response)
+        return _drift_status(stream_id, metric_name)
+
+    @app.get(f"{API_V1_PREFIX}/drift/alerts", response_model=DriftAlertListResponse)
+    def list_drift_alerts_v1() -> DriftAlertListResponse:
+        return _list_drift_alerts()
+
+    @app.get("/drift/alerts", response_model=DriftAlertListResponse, deprecated=True)
+    def list_drift_alerts_legacy(response: Response) -> DriftAlertListResponse:
+        _set_deprecation_headers(response)
+        return _list_drift_alerts()
 
     @app.get(f"{API_V1_PREFIX}/auth/keys", response_model=APIKeyListResponse)
     def list_api_keys_v1() -> APIKeyListResponse:
