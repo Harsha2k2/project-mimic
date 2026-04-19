@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import html
 import json
 from enum import Enum
@@ -21,6 +22,7 @@ from pydantic import ConfigDict, Field
 
 from .error_mapping import map_exception_to_error
 from .audit_export import build_audit_export_sink_from_env
+from .billing import BillingPrimitives, InMemoryBillingStore, JsonFileBillingStore
 from .drift_detection import DriftMonitor
 from .engine import ExecutionEngine
 from .event_stream import EventStreamBroker
@@ -413,6 +415,60 @@ class UsageSummaryResponse(APIPayloadModel):
     total_units: float
 
 
+class BillingPlanUpsertRequest(APIPayloadModel):
+    plan_id: str
+    description: str = ""
+    included_units: dict[str, float] = Field(default_factory=dict)
+    hard_limits: bool = True
+    overage_buffer_units: dict[str, float] = Field(default_factory=dict)
+
+
+class BillingPlanResponse(APIPayloadModel):
+    plan_id: str
+    description: str
+    included_units: dict[str, float] = Field(default_factory=dict)
+    hard_limits: bool
+    overage_buffer_units: dict[str, float] = Field(default_factory=dict)
+    created_at: float
+    updated_at: float
+
+
+class BillingPlanListResponse(APIPayloadModel):
+    items: list[BillingPlanResponse]
+    total: int
+
+
+class BillingSubscriptionAssignRequest(APIPayloadModel):
+    plan_id: str
+    overage_protection: bool = True
+
+
+class BillingSubscriptionResponse(APIPayloadModel):
+    tenant_id: str
+    plan_id: str
+    overage_protection: bool
+    started_at: float
+    updated_at: float
+
+
+class BillingOverageStatusResponse(APIPayloadModel):
+    tenant_id: str
+    plan_id: str | None = None
+    overage_protection: bool
+    usage_dimensions: dict[str, float] = Field(default_factory=dict)
+    limits: dict[str, float] = Field(default_factory=dict)
+    overage_buffer_units: dict[str, float] = Field(default_factory=dict)
+    exceeded_dimensions: dict[str, float] = Field(default_factory=dict)
+    blocked_dimensions: list[str] = Field(default_factory=list)
+    blocked: bool
+    within_limits: bool
+
+
+class BillingMonthlyReportResponse(BillingOverageStatusResponse):
+    month: str
+    generated_at: float
+
+
 class DriftSampleRequest(APIPayloadModel):
     stream_id: str
     metric_name: str
@@ -578,6 +634,14 @@ def create_app() -> FastAPI:
     feature_flag_file_path = os.getenv("FEATURE_FLAG_FILE_PATH", "")
     usage_metering_store_type = os.getenv("USAGE_METERING_STORE", "memory").strip().lower()
     usage_metering_file_path = os.getenv("USAGE_METERING_FILE_PATH", "")
+    billing_store_type = os.getenv("BILLING_STORE", "memory").strip().lower()
+    billing_file_path = os.getenv("BILLING_FILE_PATH", "")
+    billing_enforcement_enabled = os.getenv("BILLING_ENFORCEMENT_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     drift_baseline_window = int(os.getenv("DRIFT_BASELINE_WINDOW", "20"))
     drift_recent_window = int(os.getenv("DRIFT_RECENT_WINDOW", "10"))
     drift_default_threshold = float(os.getenv("DRIFT_DEFAULT_THRESHOLD", "0.25"))
@@ -717,6 +781,13 @@ def create_app() -> FastAPI:
     else:
         usage_metering_store = InMemoryUsageMeteringStore()
 
+    if billing_store_type == "file":
+        if not billing_file_path:
+            raise RuntimeError("BILLING_FILE_PATH is required when BILLING_STORE=file")
+        billing_store = JsonFileBillingStore(billing_file_path)
+    else:
+        billing_store = InMemoryBillingStore()
+
     if policy_decision_store_type == "file":
         if not policy_decision_file_path:
             raise RuntimeError("POLICY_DECISION_FILE_PATH is required when POLICY_DECISION_STORE=file")
@@ -746,6 +817,7 @@ def create_app() -> FastAPI:
     model_registry = ModelRegistry(store=model_registry_store)
     feature_flags = FeatureFlagService(store=feature_flag_store)
     usage_metering = TenantUsageMetering(store=usage_metering_store)
+    billing = BillingPrimitives(store=billing_store)
     drift_monitor = DriftMonitor(
         baseline_window=drift_baseline_window,
         recent_window=drift_recent_window,
@@ -784,6 +856,8 @@ def create_app() -> FastAPI:
         if path.startswith(f"{API_V1_PREFIX}/feature-flags") or path.startswith("/feature-flags"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/usage/metering") or path.startswith("/usage/metering"):
+            return "admin"
+        if path.startswith(f"{API_V1_PREFIX}/billing") or path.startswith("/billing"):
             return "admin"
         if path.startswith(f"{API_V1_PREFIX}/events/subscriptions") or path.startswith("/events/subscriptions"):
             return "admin"
@@ -1124,6 +1198,190 @@ def create_app() -> FastAPI:
             },
             total_units=float(payload.get("total_units", 0.0)),
         )
+
+    def _current_month() -> str:
+        return datetime.now(timezone.utc).strftime("%Y-%m")
+
+    def _month_day_range(month: str) -> tuple[int, int]:
+        try:
+            parsed = datetime.strptime(month, "%Y-%m")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="month must be in YYYY-MM format") from exc
+
+        start_dt = datetime(parsed.year, parsed.month, 1, tzinfo=timezone.utc)
+        if parsed.month == 12:
+            next_month_dt = datetime(parsed.year + 1, 1, 1, tzinfo=timezone.utc)
+        else:
+            next_month_dt = datetime(parsed.year, parsed.month + 1, 1, tzinfo=timezone.utc)
+
+        start_day = int(start_dt.timestamp()) // 86400
+        end_day = (int(next_month_dt.timestamp()) // 86400) - 1
+        return start_day, end_day
+
+    def _to_billing_plan_response(payload: dict[str, Any]) -> BillingPlanResponse:
+        return BillingPlanResponse(
+            plan_id=str(payload.get("plan_id", "")),
+            description=str(payload.get("description", "")),
+            included_units={
+                str(key): float(value)
+                for key, value in dict(payload.get("included_units", {})).items()
+            },
+            hard_limits=bool(payload.get("hard_limits", True)),
+            overage_buffer_units={
+                str(key): float(value)
+                for key, value in dict(payload.get("overage_buffer_units", {})).items()
+            },
+            created_at=float(payload.get("created_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_billing_subscription_response(payload: dict[str, Any]) -> BillingSubscriptionResponse:
+        return BillingSubscriptionResponse(
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            plan_id=str(payload.get("plan_id", "")),
+            overage_protection=bool(payload.get("overage_protection", True)),
+            started_at=float(payload.get("started_at", 0.0)),
+            updated_at=float(payload.get("updated_at", 0.0)),
+        )
+
+    def _to_billing_overage_status_response(payload: dict[str, Any]) -> BillingOverageStatusResponse:
+        return BillingOverageStatusResponse(
+            tenant_id=str(payload.get("tenant_id", default_tenant)),
+            plan_id=(None if payload.get("plan_id") in {None, ""} else str(payload.get("plan_id"))),
+            overage_protection=bool(payload.get("overage_protection", False)),
+            usage_dimensions={
+                str(key): float(value)
+                for key, value in dict(payload.get("usage_dimensions", {})).items()
+            },
+            limits={
+                str(key): float(value)
+                for key, value in dict(payload.get("limits", {})).items()
+            },
+            overage_buffer_units={
+                str(key): float(value)
+                for key, value in dict(payload.get("overage_buffer_units", {})).items()
+            },
+            exceeded_dimensions={
+                str(key): float(value)
+                for key, value in dict(payload.get("exceeded_dimensions", {})).items()
+            },
+            blocked_dimensions=[str(item) for item in payload.get("blocked_dimensions", []) if isinstance(item, str)],
+            blocked=bool(payload.get("blocked", False)),
+            within_limits=bool(payload.get("within_limits", True)),
+        )
+
+    def _to_billing_monthly_report_response(payload: dict[str, Any]) -> BillingMonthlyReportResponse:
+        return BillingMonthlyReportResponse(
+            month=str(payload.get("month", _current_month())),
+            generated_at=float(payload.get("generated_at", time.time())),
+            **_to_billing_overage_status_response(payload).model_dump(mode="python"),
+        )
+
+    def _upsert_billing_plan(payload: BillingPlanUpsertRequest) -> BillingPlanResponse:
+        try:
+            plan = billing.upsert_plan(
+                plan_id=payload.plan_id,
+                description=payload.description,
+                included_units=payload.included_units,
+                hard_limits=payload.hard_limits,
+                overage_buffer_units=payload.overage_buffer_units,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_billing_plan_response(plan)
+
+    def _list_billing_plans() -> BillingPlanListResponse:
+        items = [_to_billing_plan_response(item) for item in billing.list_plans()]
+        return BillingPlanListResponse(items=items, total=len(items))
+
+    def _get_billing_plan(plan_id: str) -> BillingPlanResponse:
+        try:
+            plan = billing.get_plan(plan_id=plan_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="billing plan not found") from exc
+        return _to_billing_plan_response(plan)
+
+    def _assign_billing_plan(tenant_id: str, payload: BillingSubscriptionAssignRequest) -> BillingSubscriptionResponse:
+        try:
+            subscription = billing.assign_plan(
+                tenant_id=tenant_id,
+                plan_id=payload.plan_id,
+                overage_protection=payload.overage_protection,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="billing plan not found") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_billing_subscription_response(subscription)
+
+    def _get_billing_subscription(tenant_id: str) -> BillingSubscriptionResponse:
+        try:
+            subscription = billing.get_subscription(tenant_id=tenant_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="billing subscription not found") from exc
+        return _to_billing_subscription_response(subscription)
+
+    def _usage_dimensions_for_month(tenant_id: str, month: str) -> dict[str, float]:
+        start_day, end_day = _month_day_range(month)
+        summary_payload = usage_metering.summarize(
+            tenant_id=tenant_id,
+            start_day=start_day,
+            end_day=end_day,
+        )
+        return {
+            str(key): float(value)
+            for key, value in dict(summary_payload.get("dimensions", {})).items()
+        }
+
+    def _billing_overage_status(tenant_id: str, month: str) -> BillingOverageStatusResponse:
+        try:
+            usage_dimensions = _usage_dimensions_for_month(tenant_id, month)
+            payload = billing.check_overage(tenant_id=tenant_id, usage_dimensions=usage_dimensions)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_billing_overage_status_response(payload)
+
+    def _billing_monthly_report(tenant_id: str, month: str) -> BillingMonthlyReportResponse:
+        try:
+            usage_dimensions = _usage_dimensions_for_month(tenant_id, month)
+            payload = billing.monthly_report(
+                tenant_id=tenant_id,
+                month=month,
+                usage_dimensions=usage_dimensions,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return _to_billing_monthly_report_response(payload)
+
+    def _billing_enforcement_response(request: Request, request_id: str, tenant_id: str) -> JSONResponse | None:
+        if not billing_enforcement_enabled:
+            return None
+
+        try:
+            status = _billing_overage_status(tenant_id, _current_month())
+        except Exception:
+            return None
+
+        if not status.blocked:
+            return None
+        if "api_request" not in status.blocked_dimensions:
+            return None
+
+        response = _error_response(
+            request,
+            status_code=402,
+            code=APIErrorCode.QUOTA_EXCEEDED,
+            message="billing overage protection blocked this request",
+            details=[
+                {
+                    "tenant_id": tenant_id,
+                    "blocked_dimensions": status.blocked_dimensions,
+                }
+            ],
+        )
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Correlation-ID"] = request_id
+        return response
 
     def _to_drift_status_response(payload: dict[str, Any]) -> DriftStatusResponse:
         return DriftStatusResponse(
@@ -1962,6 +2220,10 @@ def create_app() -> FastAPI:
             throttled = _enforce_tenant_limits(request, request_id, _tenant_id(request))
             if throttled is not None:
                 return throttled
+
+            overage_blocked = _billing_enforcement_response(request, request_id, _tenant_id(request))
+            if overage_blocked is not None:
+                return overage_blocked
 
         start = time.perf_counter()
         with api_tracer.start_span(
@@ -2870,6 +3132,131 @@ def create_app() -> FastAPI:
         if not resolved_tenant:
             resolved_tenant = _tenant_id(request)
         return _usage_summary(tenant_id=resolved_tenant, start_day=start_day, end_day=end_day)
+
+    @app.post(f"{API_V1_PREFIX}/billing/plans", response_model=BillingPlanResponse)
+    def upsert_billing_plan_v1(
+        payload: BillingPlanUpsertRequest,
+        request: Request,
+    ) -> BillingPlanResponse:
+        plan = _upsert_billing_plan(payload)
+        _append_audit_event(
+            request,
+            action="billing.plan.upsert",
+            resource_type="billing_plan",
+            resource_id=plan.plan_id,
+            details={"hard_limits": plan.hard_limits},
+        )
+        return plan
+
+    @app.post("/billing/plans", response_model=BillingPlanResponse, deprecated=True)
+    def upsert_billing_plan_legacy(
+        payload: BillingPlanUpsertRequest,
+        response: Response,
+        request: Request,
+    ) -> BillingPlanResponse:
+        _set_deprecation_headers(response)
+        plan = _upsert_billing_plan(payload)
+        _append_audit_event(
+            request,
+            action="billing.plan.upsert",
+            resource_type="billing_plan",
+            resource_id=plan.plan_id,
+            details={"hard_limits": plan.hard_limits},
+        )
+        return plan
+
+    @app.get(f"{API_V1_PREFIX}/billing/plans", response_model=BillingPlanListResponse)
+    def list_billing_plans_v1() -> BillingPlanListResponse:
+        return _list_billing_plans()
+
+    @app.get("/billing/plans", response_model=BillingPlanListResponse, deprecated=True)
+    def list_billing_plans_legacy(response: Response) -> BillingPlanListResponse:
+        _set_deprecation_headers(response)
+        return _list_billing_plans()
+
+    @app.get(f"{API_V1_PREFIX}/billing/plans/{{plan_id}}", response_model=BillingPlanResponse)
+    def get_billing_plan_v1(plan_id: str) -> BillingPlanResponse:
+        return _get_billing_plan(plan_id)
+
+    @app.get("/billing/plans/{plan_id}", response_model=BillingPlanResponse, deprecated=True)
+    def get_billing_plan_legacy(plan_id: str, response: Response) -> BillingPlanResponse:
+        _set_deprecation_headers(response)
+        return _get_billing_plan(plan_id)
+
+    @app.post(f"{API_V1_PREFIX}/billing/subscriptions/{{tenant_id}}", response_model=BillingSubscriptionResponse)
+    def assign_billing_subscription_v1(
+        tenant_id: str,
+        payload: BillingSubscriptionAssignRequest,
+        request: Request,
+    ) -> BillingSubscriptionResponse:
+        subscription = _assign_billing_plan(tenant_id, payload)
+        _append_audit_event(
+            request,
+            action="billing.subscription.assign",
+            resource_type="billing_subscription",
+            resource_id=tenant_id,
+            details={"plan_id": subscription.plan_id, "overage_protection": subscription.overage_protection},
+        )
+        return subscription
+
+    @app.post("/billing/subscriptions/{tenant_id}", response_model=BillingSubscriptionResponse, deprecated=True)
+    def assign_billing_subscription_legacy(
+        tenant_id: str,
+        payload: BillingSubscriptionAssignRequest,
+        response: Response,
+        request: Request,
+    ) -> BillingSubscriptionResponse:
+        _set_deprecation_headers(response)
+        subscription = _assign_billing_plan(tenant_id, payload)
+        _append_audit_event(
+            request,
+            action="billing.subscription.assign",
+            resource_type="billing_subscription",
+            resource_id=tenant_id,
+            details={"plan_id": subscription.plan_id, "overage_protection": subscription.overage_protection},
+        )
+        return subscription
+
+    @app.get(f"{API_V1_PREFIX}/billing/subscriptions/{{tenant_id}}", response_model=BillingSubscriptionResponse)
+    def get_billing_subscription_v1(tenant_id: str) -> BillingSubscriptionResponse:
+        return _get_billing_subscription(tenant_id)
+
+    @app.get("/billing/subscriptions/{tenant_id}", response_model=BillingSubscriptionResponse, deprecated=True)
+    def get_billing_subscription_legacy(tenant_id: str, response: Response) -> BillingSubscriptionResponse:
+        _set_deprecation_headers(response)
+        return _get_billing_subscription(tenant_id)
+
+    @app.get(f"{API_V1_PREFIX}/billing/overage/{{tenant_id}}", response_model=BillingOverageStatusResponse)
+    def billing_overage_status_v1(
+        tenant_id: str,
+        month: str | None = Query(default=None),
+    ) -> BillingOverageStatusResponse:
+        return _billing_overage_status(tenant_id, month or _current_month())
+
+    @app.get("/billing/overage/{tenant_id}", response_model=BillingOverageStatusResponse, deprecated=True)
+    def billing_overage_status_legacy(
+        tenant_id: str,
+        response: Response,
+        month: str | None = Query(default=None),
+    ) -> BillingOverageStatusResponse:
+        _set_deprecation_headers(response)
+        return _billing_overage_status(tenant_id, month or _current_month())
+
+    @app.get(f"{API_V1_PREFIX}/billing/reports/{{tenant_id}}", response_model=BillingMonthlyReportResponse)
+    def billing_monthly_report_v1(
+        tenant_id: str,
+        month: str | None = Query(default=None),
+    ) -> BillingMonthlyReportResponse:
+        return _billing_monthly_report(tenant_id, month or _current_month())
+
+    @app.get("/billing/reports/{tenant_id}", response_model=BillingMonthlyReportResponse, deprecated=True)
+    def billing_monthly_report_legacy(
+        tenant_id: str,
+        response: Response,
+        month: str | None = Query(default=None),
+    ) -> BillingMonthlyReportResponse:
+        _set_deprecation_headers(response)
+        return _billing_monthly_report(tenant_id, month or _current_month())
 
     @app.post(f"{API_V1_PREFIX}/drift/samples", response_model=DriftStatusResponse)
     def ingest_drift_sample_v1(payload: DriftSampleRequest, request: Request) -> DriftStatusResponse:
