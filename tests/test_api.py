@@ -1,4 +1,6 @@
+import base64
 from fastapi.testclient import TestClient
+import hashlib
 import time
 
 from project_mimic.api import create_app
@@ -118,6 +120,95 @@ def test_decision_click_returns_no_target_for_non_interactable_dom() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["status"] == "no_target"
+
+
+def test_analyze_frame_endpoint_grounds_from_dom_snapshot() -> None:
+    client = TestClient(create_app())
+    screenshot_bytes = b"frame-bytes"
+
+    response = client.post(
+        "/api/v1/vision/analyze-frame",
+        json={
+            "screenshot_base64": base64.b64encode(screenshot_bytes).decode("ascii"),
+            "dom_snapshot": {
+                "entities": [
+                    {
+                        "entity_id": "e1",
+                        "label": "Search",
+                        "role": "button",
+                        "text": "Search Flights",
+                        "confidence": 0.9,
+                        "bbox": {"x": 100, "y": 100, "width": 120, "height": 40},
+                    }
+                ],
+                "dom_nodes": [
+                    {
+                        "dom_node_id": "search-btn",
+                        "role": "button",
+                        "text": "Search Flights",
+                        "visible": True,
+                        "enabled": True,
+                        "z_index": 10,
+                        "bbox": {"x": 102, "y": 101, "width": 120, "height": 40},
+                    }
+                ],
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["frame_hash"] == hashlib.sha256(screenshot_bytes).hexdigest()
+    assert payload["entity_source"] == "dom_snapshot"
+    assert payload["decision"]["status"] == "ok"
+    assert payload["decision"]["dom_node_id"] == "search-btn"
+
+
+def test_analyze_frame_endpoint_returns_none_when_no_entities_available() -> None:
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v1/vision/analyze-frame",
+        json={
+            "screenshot_base64": base64.b64encode(b"frame-bytes").decode("ascii"),
+            "dom_snapshot": {
+                "dom_nodes": [
+                    {
+                        "dom_node_id": "search-btn",
+                        "role": "button",
+                        "text": "Search Flights",
+                        "visible": True,
+                        "enabled": True,
+                        "z_index": 10,
+                        "bbox": {"x": 102, "y": 101, "width": 120, "height": 40},
+                    }
+                ]
+            },
+            "infer_entities": False,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["entity_source"] == "none"
+    assert payload["entities"] == []
+    assert payload["decision"] is None
+
+
+def test_analyze_frame_endpoint_rejects_invalid_base64() -> None:
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/v1/vision/analyze-frame",
+        json={
+            "screenshot_base64": "@@not-base64@@",
+            "dom_snapshot": {},
+        },
+    )
+
+    assert response.status_code == 422
+    payload = response.json()
+    assert payload["error"]["code"] == "PAYLOAD_CONSTRAINT_VIOLATION"
 
 
 def test_metrics_endpoint_tracks_requests() -> None:

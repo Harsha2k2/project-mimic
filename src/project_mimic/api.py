@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 from datetime import datetime, timezone
 import html
+import hashlib
 import json
 from enum import Enum
 import os
@@ -248,6 +251,92 @@ class DecideResponse(APIPayloadModel):
                 "x": 162,
                 "y": 121,
                 "score": 0.93,
+            }
+        }
+    )
+
+
+class AnalyzeFrameRequest(APIPayloadModel):
+    screenshot_base64: str = Field(min_length=1)
+    dom_snapshot: dict[str, Any] = Field(default_factory=dict)
+    task_hint: str = ""
+    infer_entities: bool = True
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "screenshot_base64": "ZnJhbWUtYnl0ZXM=",
+                "dom_snapshot": {
+                    "entities": [
+                        {
+                            "entity_id": "e1",
+                            "label": "Search",
+                            "role": "button",
+                            "text": "Search Flights",
+                            "confidence": 0.91,
+                            "bbox": {"x": 100, "y": 100, "width": 120, "height": 40},
+                        }
+                    ],
+                    "dom_nodes": [
+                        {
+                            "dom_node_id": "search-btn",
+                            "role": "button",
+                            "text": "Search Flights",
+                            "visible": True,
+                            "enabled": True,
+                            "z_index": 10,
+                            "bbox": {"x": 102, "y": 101, "width": 120, "height": 40},
+                        }
+                    ],
+                },
+                "task_hint": "submit search",
+                "infer_entities": True,
+            }
+        }
+    )
+
+
+class AnalyzeFrameResponse(APIPayloadModel):
+    frame_hash: str
+    entity_source: str
+    entities: list[UIEntityPayload] = Field(default_factory=list)
+    dom_nodes: list[DOMNodePayload] = Field(default_factory=list)
+    decision: DecideResponse | None = None
+
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "frame_hash": "d063457705d66d6f016e4cdd747db3af8d70ebfd36baddf3fef676c6cd051fae",
+                "entity_source": "dom_snapshot",
+                "entities": [
+                    {
+                        "entity_id": "e1",
+                        "label": "Search",
+                        "role": "button",
+                        "text": "Search Flights",
+                        "confidence": 0.91,
+                        "bbox": {"x": 100, "y": 100, "width": 120, "height": 40},
+                    }
+                ],
+                "dom_nodes": [
+                    {
+                        "dom_node_id": "search-btn",
+                        "role": "button",
+                        "text": "Search Flights",
+                        "visible": True,
+                        "enabled": True,
+                        "z_index": 10,
+                        "bbox": {"x": 102, "y": 101, "width": 120, "height": 40},
+                    }
+                ],
+                "decision": {
+                    "status": "ok",
+                    "state": "complete",
+                    "dom_node_id": "search-btn",
+                    "x": 162,
+                    "y": 121,
+                    "score": 0.93,
+                },
             }
         }
     )
@@ -6174,41 +6263,178 @@ def create_app() -> FastAPI:
             key_id_by_secret.pop(secret, None)
         return APIKeyRevokeResponse(key_id=key_id, revoked=True)
 
-    def _decide_click(payload: DecideRequest) -> DecideResponse:
-        entities = [
-            UIEntity(
-                entity_id=item.entity_id,
-                label=item.label,
-                role=item.role,
-                text=item.text,
-                confidence=item.confidence,
-                bbox=BBox(
-                    x=item.bbox.x,
-                    y=item.bbox.y,
-                    width=item.bbox.width,
-                    height=item.bbox.height,
-                ),
-            )
-            for item in payload.entities
-        ]
+    def _to_ui_entity(item: UIEntityPayload) -> UIEntity:
+        return UIEntity(
+            entity_id=item.entity_id,
+            label=item.label,
+            role=item.role,
+            text=item.text,
+            confidence=item.confidence,
+            bbox=BBox(
+                x=item.bbox.x,
+                y=item.bbox.y,
+                width=item.bbox.width,
+                height=item.bbox.height,
+            ),
+        )
 
-        dom_nodes = [
-            DOMNode(
-                dom_node_id=item.dom_node_id,
-                role=item.role,
-                text=item.text,
-                visible=item.visible,
-                enabled=item.enabled,
-                z_index=item.z_index,
-                bbox=BBox(
-                    x=item.bbox.x,
-                    y=item.bbox.y,
-                    width=item.bbox.width,
-                    height=item.bbox.height,
-                ),
+    def _to_dom_node(item: DOMNodePayload) -> DOMNode:
+        return DOMNode(
+            dom_node_id=item.dom_node_id,
+            role=item.role,
+            text=item.text,
+            visible=item.visible,
+            enabled=item.enabled,
+            z_index=item.z_index,
+            bbox=BBox(
+                x=item.bbox.x,
+                y=item.bbox.y,
+                width=item.bbox.width,
+                height=item.bbox.height,
+            ),
+        )
+
+    def _decode_screenshot_payload(value: str) -> bytes:
+        try:
+            decoded = base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValueError("screenshot_base64 must contain valid base64 bytes") from exc
+        if not decoded:
+            raise ValueError("screenshot_base64 must decode to non-empty bytes")
+        return decoded
+
+    def _bbox_payload_from_raw(item: dict[str, Any]) -> BBoxPayload | None:
+        raw_bbox = item.get("bbox") if isinstance(item.get("bbox"), dict) else item
+        if not isinstance(raw_bbox, dict):
+            return None
+        try:
+            return BBoxPayload(
+                x=int(raw_bbox.get("x", 0)),
+                y=int(raw_bbox.get("y", 0)),
+                width=int(raw_bbox.get("width", 0)),
+                height=int(raw_bbox.get("height", 0)),
             )
-            for item in payload.dom_nodes
-        ]
+        except (TypeError, ValueError):
+            return None
+
+    def _ui_entity_payload_from_raw(item: Any, index: int) -> UIEntityPayload | None:
+        if not isinstance(item, dict):
+            return None
+
+        bbox = _bbox_payload_from_raw(item)
+        if bbox is None:
+            return None
+
+        try:
+            confidence = float(item.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        confidence = min(max(confidence, 0.0), 1.0)
+
+        label = str(item.get("label") or item.get("role") or item.get("text") or "unknown")
+        role = str(item.get("role") or "unknown")
+        text = str(item.get("text") or "")
+        entity_id = str(item.get("entity_id") or f"entity-{index}")
+        return UIEntityPayload(
+            entity_id=entity_id,
+            label=label,
+            role=role,
+            text=text,
+            confidence=confidence,
+            bbox=bbox,
+        )
+
+    def _dom_node_payload_from_raw(item: Any, index: int) -> DOMNodePayload | None:
+        if not isinstance(item, dict):
+            return None
+
+        bbox = _bbox_payload_from_raw(item)
+        if bbox is None:
+            return None
+
+        try:
+            z_index = int(item.get("z_index", 0))
+        except (TypeError, ValueError):
+            z_index = 0
+
+        return DOMNodePayload(
+            dom_node_id=str(item.get("dom_node_id") or f"dom-node-{index}"),
+            role=str(item.get("role") or "unknown"),
+            text=str(item.get("text") or ""),
+            visible=bool(item.get("visible", True)),
+            enabled=bool(item.get("enabled", True)),
+            z_index=z_index,
+            bbox=bbox,
+        )
+
+    def _analyze_frame(payload: AnalyzeFrameRequest) -> AnalyzeFrameResponse:
+        screenshot = _decode_screenshot_payload(payload.screenshot_base64)
+        frame_hash = hashlib.sha256(screenshot).hexdigest()
+
+        raw_entities = payload.dom_snapshot.get("entities", [])
+        raw_dom_nodes = payload.dom_snapshot.get("dom_nodes", [])
+
+        entities: list[UIEntityPayload] = []
+        if isinstance(raw_entities, list):
+            entities = [
+                candidate
+                for index, item in enumerate(raw_entities)
+                for candidate in [_ui_entity_payload_from_raw(item, index)]
+                if candidate is not None
+            ]
+
+        dom_nodes: list[DOMNodePayload] = []
+        if isinstance(raw_dom_nodes, list):
+            dom_nodes = [
+                candidate
+                for index, item in enumerate(raw_dom_nodes)
+                for candidate in [_dom_node_payload_from_raw(item, index)]
+                if candidate is not None
+            ]
+
+        entity_source = "dom_snapshot" if entities else "none"
+        if not entities and payload.infer_entities and synthetic_triton_client is not None:
+            try:
+                inferred_entities = synthetic_triton_client.infer_entities(
+                    screenshot=screenshot,
+                    task_hint=payload.task_hint,
+                )
+            except Exception as exc:
+                raise HTTPException(status_code=502, detail=f"vision inference failed: {exc}") from exc
+
+            entities = [
+                UIEntityPayload(
+                    entity_id=item.entity_id,
+                    label=item.label,
+                    role=item.role,
+                    text=item.text,
+                    confidence=min(max(item.confidence, 0.0), 1.0),
+                    bbox=BBoxPayload(
+                        x=item.bbox.x,
+                        y=item.bbox.y,
+                        width=item.bbox.width,
+                        height=item.bbox.height,
+                    ),
+                )
+                for item in inferred_entities
+            ]
+            entity_source = "triton" if entities else "none"
+
+        decision: DecideResponse | None = None
+        if entities and dom_nodes:
+            decision = _decide_click(DecideRequest(entities=entities, dom_nodes=dom_nodes))
+
+        return AnalyzeFrameResponse(
+            frame_hash=frame_hash,
+            entity_source=entity_source,
+            entities=entities,
+            dom_nodes=dom_nodes,
+            decision=decision,
+        )
+
+    def _decide_click(payload: DecideRequest) -> DecideResponse:
+        entities = [_to_ui_entity(item) for item in payload.entities]
+        dom_nodes = [_to_dom_node(item) for item in payload.dom_nodes]
 
         decision = engine.decide_coordinate_click(entities=entities, dom_nodes=dom_nodes)
         return DecideResponse(
@@ -11288,6 +11514,80 @@ def create_app() -> FastAPI:
             action_type="click",
         )
         return decide_response
+
+    @app.post(
+        f"{API_V1_PREFIX}/vision/analyze-frame",
+        response_model=AnalyzeFrameResponse,
+        openapi_extra={
+            "responses": {
+                "200": {
+                    "description": "Parse screenshot + DOM snapshot and optionally ground a click candidate",
+                    "content": {
+                        "application/json": {
+                            "example": {
+                                "frame_hash": "d063457705d66d6f016e4cdd747db3af8d70ebfd36baddf3fef676c6cd051fae",
+                                "entity_source": "dom_snapshot",
+                                "entities": [
+                                    {
+                                        "entity_id": "e1",
+                                        "label": "Search",
+                                        "role": "button",
+                                        "text": "Search Flights",
+                                        "confidence": 0.91,
+                                        "bbox": {"x": 100, "y": 100, "width": 120, "height": 40},
+                                    }
+                                ],
+                                "dom_nodes": [
+                                    {
+                                        "dom_node_id": "search-btn",
+                                        "role": "button",
+                                        "text": "Search Flights",
+                                        "visible": True,
+                                        "enabled": True,
+                                        "z_index": 10,
+                                        "bbox": {"x": 102, "y": 101, "width": 120, "height": 40},
+                                    }
+                                ],
+                                "decision": {
+                                    "status": "ok",
+                                    "state": "complete",
+                                    "dom_node_id": "search-btn",
+                                    "x": 162,
+                                    "y": 121,
+                                    "score": 0.93,
+                                },
+                            }
+                        }
+                    },
+                }
+            }
+        },
+    )
+    def analyze_frame_v1(payload: AnalyzeFrameRequest, request: Request) -> AnalyzeFrameResponse:
+        analyzed = _analyze_frame(payload)
+        metrics.record_feature_result(
+            "vision.analyze_frame",
+            success=bool(analyzed.decision and analyzed.decision.status == "ok"),
+            trace_id=getattr(request.state, "request_id", None),
+            action_type="analyze_frame",
+        )
+        return analyzed
+
+    @app.post("/vision/analyze-frame", response_model=AnalyzeFrameResponse, deprecated=True)
+    def analyze_frame_legacy(
+        payload: AnalyzeFrameRequest,
+        response: Response,
+        request: Request,
+    ) -> AnalyzeFrameResponse:
+        _set_deprecation_headers(response)
+        analyzed = _analyze_frame(payload)
+        metrics.record_feature_result(
+            "vision.analyze_frame",
+            success=bool(analyzed.decision and analyzed.decision.status == "ok"),
+            trace_id=getattr(request.state, "request_id", None),
+            action_type="analyze_frame",
+        )
+        return analyzed
 
     @app.get(f"{API_V1_PREFIX}/metrics")
     def get_metrics_v1() -> dict[str, Any]:

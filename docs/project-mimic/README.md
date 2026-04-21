@@ -81,6 +81,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/65-release-readiness-scorecard-from-ci-evidence.md`
   - `lld/66-governance-approval-workflows-for-high-risk-policy-changes.md`
   - `lld/67-full-cost-observability-dashboard-gpu-queue-storage-egress.md`
+  - `lld/68-frame-ingestion-and-grounding-api.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

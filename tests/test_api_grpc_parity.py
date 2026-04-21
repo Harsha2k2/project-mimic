@@ -1,9 +1,11 @@
+import base64
 import json
 
 from fastapi.testclient import TestClient
 
 from project_mimic.api import create_app
 from project_mimic.grpc_runtime import (
+    AnalyzeFrameRequest,
     CreateSessionRequest,
     GroundActionRequest,
     SessionServiceHandler,
@@ -64,3 +66,54 @@ def test_api_decision_and_grpc_grounding_contract_parity() -> None:
     assert api_body["dom_node_id"] == grpc_response.dom_node_id
     assert api_body["x"] == grpc_response.x
     assert api_body["y"] == grpc_response.y
+
+
+def test_api_and_grpc_analyze_frame_contract_parity() -> None:
+    screenshot = b"frame-bytes"
+    dom_snapshot = {
+        "entities": [
+            {
+                "entity_id": "e1",
+                "label": "Search",
+                "role": "button",
+                "text": "Search",
+                "confidence": 0.9,
+                "bbox": {"x": 10, "y": 20, "width": 80, "height": 30},
+            }
+        ],
+        "dom_nodes": [
+            {
+                "dom_node_id": "search-btn",
+                "role": "button",
+                "text": "Search",
+                "visible": True,
+                "enabled": True,
+                "z_index": 1,
+                "bbox": {"x": 12, "y": 22, "width": 80, "height": 30},
+            }
+        ],
+    }
+
+    client = TestClient(create_app())
+    api_response = client.post(
+        "/api/v1/vision/analyze-frame",
+        json={
+            "screenshot_base64": base64.b64encode(screenshot).decode("ascii"),
+            "dom_snapshot": dom_snapshot,
+            "infer_entities": False,
+        },
+    )
+    assert api_response.status_code == 200
+
+    grpc_service = VisionServiceHandler()
+    grpc_response = grpc_service.AnalyzeFrame(
+        AnalyzeFrameRequest(
+            screenshot=screenshot,
+            dom_snapshot_json=json.dumps(dom_snapshot),
+            task_hint="",
+        )
+    )
+
+    api_payload = api_response.json()
+    assert api_payload["frame_hash"] == grpc_response.frame_hash
+    assert len(api_payload["entities"]) == len(grpc_response.entities_json)
