@@ -83,6 +83,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/67-full-cost-observability-dashboard-gpu-queue-storage-egress.md`
   - `lld/68-frame-ingestion-and-grounding-api.md`
   - `lld/69-screenshot-artifact-storage-and-replay-api.md`
+  - `lld/70-operator-console-screenshot-artifact-links.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

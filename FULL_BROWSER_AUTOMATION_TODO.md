@@ -42,7 +42,7 @@ This document describes the concrete work required to move Project Mimic from it
   - [x] Send live screenshot payloads to the vision/Triton client
   - [x] Store screenshot artifacts for debugging and replay
 - [ ] Add screenshot-based operator observability
-  - [ ] Expose screenshot artifact links in the operator console
+  - [x] Expose screenshot artifact links in the operator console
 
 ## 5. DOM Snapshot Ingestion
 - [ ] Add DOM capture from Playwright

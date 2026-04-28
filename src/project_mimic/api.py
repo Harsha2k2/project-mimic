@@ -5925,6 +5925,37 @@ def create_app() -> FastAPI:
             "lease_count": len(leases),
         }
 
+    def _format_operator_console_timestamp(value: Any) -> str:
+        try:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(float(value)))
+        except (TypeError, ValueError):
+            return "-"
+
+    def _summarize_screenshot_artifacts(limit: int = 25) -> dict[str, Any]:
+        records = artifact_manager.index.lookup(artifact_type=ArtifactType.SCREENSHOT)
+        records.sort(key=lambda item: item.created_at, reverse=True)
+        items: list[dict[str, Any]] = []
+        for record in records[:limit]:
+            items.append(
+                {
+                    "artifact_id": record.artifact_id,
+                    "session_id": record.session_id,
+                    "artifact_type": record.artifact_type.value,
+                    "created_at": record.created_at,
+                    "size_bytes": record.size_bytes,
+                    "checksum_sha256": record.checksum_sha256,
+                    "metadata": dict(record.metadata),
+                    "content_url": f"{API_V1_PREFIX}/artifacts/{record.artifact_id}/content",
+                }
+            )
+
+        return {
+            "available": True,
+            "total": len(records),
+            "limit": limit,
+            "items": items,
+        }
+
     def _build_operator_console_payload() -> dict[str, Any]:
         artifact_payload = _load_optional_json_file(operator_artifacts_file_path)
         queue_payload = _load_optional_json_file(operator_queue_file_path)
@@ -5933,10 +5964,12 @@ def create_app() -> FastAPI:
             "api": api_tracer.trace_snapshot(),
             "orchestrator": orchestrator_tracer.trace_snapshot(),
         }
+        live_artifacts = _summarize_screenshot_artifacts()
         return {
             "sessions": sessions,
             "traces": traces,
             "artifacts": artifact_payload if artifact_payload is not None else {"available": False},
+            "live_artifacts": live_artifacts,
             "queue": _summarize_queue_state(queue_payload),
         }
 
@@ -5944,12 +5977,39 @@ def create_app() -> FastAPI:
         sessions = payload["sessions"]
         traces = payload["traces"]
         artifacts = payload["artifacts"]
+        live_artifacts = payload.get("live_artifacts", {"items": [], "total": 0})
         queue = payload["queue"]
 
         session_rows = "".join(
             f"<tr><td>{item['session_id']}</td><td>{item['goal']}</td><td>{item['status']}</td><td>{item['tenant_id']}</td></tr>"
             for item in sessions.get("items", [])
         ) or "<tr><td colspan='4'>No sessions</td></tr>"
+
+        def _render_artifact_rows(items: list[dict[str, Any]]) -> str:
+            rows: list[str] = []
+            for item in items:
+                metadata = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+                step_index = metadata.get("step_index", "-")
+                trace_id = metadata.get("trace_id", "-")
+                created_at = _format_operator_console_timestamp(item.get("created_at"))
+                rows.append(
+                    "".join(
+                        [
+                            "<tr>",
+                            f"<td><a href='{item.get('content_url', '#')}'>{item.get('artifact_id')}</a></td>",
+                            f"<td>{item.get('session_id', '-') }</td>",
+                            f"<td>{created_at}</td>",
+                            f"<td>{item.get('size_bytes', '-')}</td>",
+                            f"<td>{step_index}</td>",
+                            f"<td>{trace_id}</td>",
+                            "</tr>",
+                        ]
+                    )
+                )
+            return "".join(rows) or "<tr><td colspan='6'>No screenshot artifacts</td></tr>"
+
+        live_artifact_rows = _render_artifact_rows(live_artifacts.get("items", []))
+        live_artifact_total = live_artifacts.get("total", 0)
 
         traces_json = json.dumps(traces, indent=2)
         artifacts_json = json.dumps(artifacts, indent=2)
@@ -5966,6 +6026,7 @@ def create_app() -> FastAPI:
         section {{ background: #121a31; border: 1px solid #24314f; border-radius: 12px; padding: 16px; margin-bottom: 16px; }}
         table {{ width: 100%; border-collapse: collapse; }}
         th, td {{ text-align: left; border-bottom: 1px solid #24314f; padding: 8px; vertical-align: top; }}
+        a {{ color: #7dc7ff; text-decoration: none; }}
         pre {{ overflow: auto; background: #09101f; padding: 12px; border-radius: 8px; }}
         .muted {{ color: #a9b4cc; }}
     </style>
@@ -5985,7 +6046,14 @@ def create_app() -> FastAPI:
         <pre>{traces_json}</pre>
     </section>
     <section>
-        <h2>Artifacts</h2>
+        <h2>Screenshot Artifacts ({live_artifact_total})</h2>
+        <table>
+            <thead><tr><th>Artifact</th><th>Session</th><th>Created</th><th>Size</th><th>Step</th><th>Trace</th></tr></thead>
+            <tbody>{live_artifact_rows}</tbody>
+        </table>
+    </section>
+    <section>
+        <h2>Artifacts Snapshot</h2>
         <pre>{artifacts_json}</pre>
     </section>
     <section>
