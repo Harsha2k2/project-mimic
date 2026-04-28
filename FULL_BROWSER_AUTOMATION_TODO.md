@@ -9,7 +9,7 @@ This document describes the concrete work required to move Project Mimic from it
   - [x] Build a worker container image with browser binaries and Node runtime
 - [ ] Add browser worker sidecar bridge
   - [x] Create a Rust/CDP sidecar for low-level event emission
-  - [ ] Wire sidecar communication between Node.js worker and Playwright
+  - [x] Wire sidecar communication between Node.js worker and Playwright
 - [x] Add browser worker health and readiness probes
   - [x] Expose liveness/readiness endpoints
   - [x] Integrate with Kubernetes deployment manifests

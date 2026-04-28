@@ -26,6 +26,10 @@ spec:
               value: "chromium,firefox,webkit"
             - name: PLAYWRIGHT_PRIMARY_BROWSER
               value: "chromium"
+            - name: SIDECAR_PORT
+              value: "7200"
+            - name: SIDECAR_URL
+              value: "http://127.0.0.1:7200"
             - name: TRITON_ENDPOINT
               value: http://mimic-triton.project-mimic.svc.cluster.local:8000
             - name: PROXY_GATEWAY

@@ -86,6 +86,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/70-operator-console-screenshot-artifact-links.md`
   - `lld/71-browser-worker-runtime-service.md`
   - `lld/72-mimetic-sidecar-service.md`
+  - `lld/73-sidecar-playwright-bridge.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`

@@ -23,6 +23,13 @@ function buildConfig(env = process.env) {
   const port = Number.isNaN(portValue) ? DEFAULT_PORT : portValue;
   const workerId = env.WORKER_ID && env.WORKER_ID.trim() ? env.WORKER_ID.trim() : `worker-${process.pid}`;
 
+  const sidecarPortValue = Number.parseInt(env.SIDECAR_PORT || "7200", 10);
+  const sidecarPort = Number.isNaN(sidecarPortValue) ? 7200 : sidecarPortValue;
+  const sidecarUrl = env.SIDECAR_URL || `http://127.0.0.1:${sidecarPort}`;
+  const emitEnabled = ["1", "true", "yes", "on"].includes(
+    (env.PLAYWRIGHT_EMIT_ENABLED || "false").toLowerCase()
+  );
+
   return {
     port,
     workerId,
@@ -30,6 +37,8 @@ function buildConfig(env = process.env) {
     primaryBrowser,
     tritonEndpoint: env.TRITON_ENDPOINT || "",
     proxyGateway: env.PROXY_GATEWAY || "",
+    sidecarUrl,
+    emitEnabled,
   };
 }
 

@@ -27,6 +27,10 @@ spec:
               value: "{{ join \",\" .Values.browserWorker.engines }}"
             - name: PLAYWRIGHT_PRIMARY_BROWSER
               value: "{{ index .Values.browserWorker.engines 0 }}"
+            - name: SIDECAR_PORT
+              value: "{{ .Values.browserWorker.sidecarPort }}"
+            - name: SIDECAR_URL
+              value: "http://127.0.0.1:{{ .Values.browserWorker.sidecarPort }}"
           livenessProbe:
             httpGet:
               path: /healthz
