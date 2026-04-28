@@ -1,12 +1,16 @@
 //! Mimetic interaction primitives for Project Mimic.
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+use serde::{Deserialize, Serialize};
+
+pub mod sidecar;
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Point {
     pub x: f64,
     pub y: f64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PointerPlanRequest {
     pub start: Point,
     pub target: Point,
@@ -15,7 +19,7 @@ pub struct PointerPlanRequest {
     pub dwell_ms: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PointerEvent {
     pub t_ms: u32,
     pub x: f64,
@@ -23,7 +27,7 @@ pub struct PointerEvent {
     pub event_type: &'static str,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct KeyEvent {
     pub t_ms: u32,
     pub key: char,

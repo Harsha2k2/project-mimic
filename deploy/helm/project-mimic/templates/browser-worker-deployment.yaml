@@ -41,3 +41,8 @@ spec:
             periodSeconds: 10
         - name: mimetic-sidecar
           image: {{ .Values.browserWorker.sidecarImage }}
+          ports:
+            - containerPort: {{ .Values.browserWorker.sidecarPort }}
+          env:
+            - name: SIDECAR_PORT
+              value: "{{ .Values.browserWorker.sidecarPort }}"

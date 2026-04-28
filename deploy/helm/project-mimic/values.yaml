@@ -10,6 +10,7 @@ browserWorker:
   sidecarImage: ghcr.io/harsha2k2/project-mimic-mimetic:latest
   replicas: 4
   port: 7000
+  sidecarPort: 7200
   engines:
     - chromium
     - firefox

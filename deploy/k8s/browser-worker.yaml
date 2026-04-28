@@ -46,5 +46,9 @@ spec:
           image: ghcr.io/harsha2k2/project-mimic-mimetic:latest
           imagePullPolicy: IfNotPresent
           env:
+            - name: SIDECAR_PORT
+              value: "7200"
             - name: RUST_LOG
               value: info
+          ports:
+            - containerPort: 7200
