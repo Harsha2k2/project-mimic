@@ -211,6 +211,88 @@ def test_analyze_frame_endpoint_rejects_invalid_base64() -> None:
     assert payload["error"]["code"] == "PAYLOAD_CONSTRAINT_VIOLATION"
 
 
+def test_session_screenshot_artifact_upload_and_list() -> None:
+    client = TestClient(create_app())
+    created = client.post("/api/v1/sessions", json={"goal": "artifact-check", "max_steps": 2})
+    session_id = created.json()["session_id"]
+    screenshot_bytes = b"artifact-bytes"
+    checksum = hashlib.sha256(screenshot_bytes).hexdigest()
+
+    upload = client.post(
+        f"/api/v1/sessions/{session_id}/artifacts/screenshot",
+        json={
+            "screenshot_base64": base64.b64encode(screenshot_bytes).decode("ascii"),
+            "expected_checksum_sha256": checksum,
+            "step_index": 3,
+            "trace_id": "trace-001",
+            "metadata": {"source": "unit-test"},
+        },
+    )
+
+    assert upload.status_code == 200
+    uploaded = upload.json()
+    assert uploaded["artifact_type"] == "screenshot"
+    assert uploaded["session_id"] == session_id
+    assert uploaded["checksum_sha256"] == checksum
+    assert uploaded["metadata"]["step_index"] == "3"
+    assert uploaded["metadata"]["trace_id"] == "trace-001"
+
+    listed = client.get(f"/api/v1/sessions/{session_id}/artifacts")
+    assert listed.status_code == 200
+    items = listed.json()["items"]
+    assert any(item["artifact_id"] == uploaded["artifact_id"] for item in items)
+
+
+def test_session_screenshot_artifact_content_roundtrip() -> None:
+    client = TestClient(create_app())
+    created = client.post("/api/v1/sessions", json={"goal": "artifact-content", "max_steps": 2})
+    session_id = created.json()["session_id"]
+    screenshot_bytes = b"artifact-content-bytes"
+
+    upload = client.post(
+        f"/api/v1/sessions/{session_id}/artifacts/screenshot",
+        json={"screenshot_base64": base64.b64encode(screenshot_bytes).decode("ascii")},
+    )
+
+    artifact_id = upload.json()["artifact_id"]
+    content_response = client.get(f"/api/v1/artifacts/{artifact_id}/content")
+    assert content_response.status_code == 200
+    payload = content_response.json()
+    assert payload["artifact"]["artifact_id"] == artifact_id
+    assert base64.b64decode(payload["content_base64"]) == screenshot_bytes
+
+
+def test_screenshot_artifact_checksum_mismatch_returns_422() -> None:
+    client = TestClient(create_app())
+    created = client.post("/api/v1/sessions", json={"goal": "artifact-mismatch", "max_steps": 2})
+    session_id = created.json()["session_id"]
+    screenshot_bytes = b"artifact-bytes"
+
+    response = client.post(
+        f"/api/v1/sessions/{session_id}/artifacts/screenshot",
+        json={
+            "screenshot_base64": base64.b64encode(screenshot_bytes).decode("ascii"),
+            "expected_checksum_sha256": "0" * 64,
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+
+
+def test_screenshot_artifact_upload_requires_session() -> None:
+    client = TestClient(create_app())
+    screenshot_bytes = b"artifact-bytes"
+
+    response = client.post(
+        "/api/v1/sessions/missing/artifacts/screenshot",
+        json={"screenshot_base64": base64.b64encode(screenshot_bytes).decode("ascii")},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "SESSION_NOT_FOUND"
+
+
 def test_metrics_endpoint_tracks_requests() -> None:
     client = TestClient(create_app())
 

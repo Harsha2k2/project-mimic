@@ -282,6 +282,14 @@ class ArtifactManager:
         checksum = hashlib.sha256(content).hexdigest()
         return checksum == record.checksum_sha256
 
+    def get_record(self, artifact_id: str) -> ArtifactRecord:
+        return self.index.get(artifact_id)
+
+    def read_content(self, artifact_id: str) -> bytes:
+        record = self.index.get(artifact_id)
+        writer = self._writer_by_artifact_id[artifact_id]
+        return writer.read_artifact(record)
+
     def set_legal_hold(self, artifact_id: str, *, case_id: str, reason: str | None = None) -> ArtifactRecord:
         if not case_id.strip():
             raise ValueError("case_id must not be empty")

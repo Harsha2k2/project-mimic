@@ -24,6 +24,14 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import ConfigDict, Field
 
 from .error_mapping import map_exception_to_error
+from .artifacts import (
+    ArtifactIntegrityError,
+    ArtifactManager,
+    ArtifactRecord,
+    ArtifactType,
+    FilesystemArtifactWriter,
+    InMemoryArtifactWriter,
+)
 from .audit_export import build_audit_export_sink_from_env
 from .autonomous_remediation import (
     AutonomousRemediationService,
@@ -1821,6 +1829,35 @@ class CostDashboardResponse(APIPayloadModel):
     latest_snapshot: CostSnapshotResponse | None = None
 
 
+class ScreenshotArtifactIngestRequest(APIPayloadModel):
+    screenshot_base64: str = Field(min_length=1)
+    expected_checksum_sha256: str | None = None
+    step_index: int | None = Field(default=None, ge=0)
+    trace_id: str | None = None
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class ArtifactRecordResponse(APIPayloadModel):
+    artifact_id: str
+    session_id: str
+    artifact_type: str
+    path: str
+    checksum_sha256: str
+    size_bytes: int
+    created_at: float
+    metadata: dict[str, str] = Field(default_factory=dict)
+
+
+class ArtifactListResponse(APIPayloadModel):
+    items: list[ArtifactRecordResponse]
+    total: int
+
+
+class ArtifactContentResponse(APIPayloadModel):
+    artifact: ArtifactRecordResponse
+    content_base64: str
+
+
 API_V1_PREFIX = "/api/v1"
 LEGACY_PREFIX = ""
 LEGACY_SUNSET_DATE = "2026-06-30"
@@ -1956,6 +1993,8 @@ def create_app() -> FastAPI:
     webhook_store_type = os.getenv("WEBHOOK_SUBSCRIPTION_STORE", "memory").strip().lower()
     webhook_store_file_path = os.getenv("WEBHOOK_SUBSCRIPTION_FILE_PATH", "")
     webhook_timeout_seconds = float(os.getenv("WEBHOOK_DELIVERY_TIMEOUT_SECONDS", "3"))
+    artifact_store_type = os.getenv("ARTIFACT_STORE", "memory").strip().lower()
+    artifact_store_dir = os.getenv("ARTIFACT_STORE_DIR", "")
     operator_artifacts_file_path = os.getenv("OPERATOR_CONSOLE_ARTIFACTS_FILE_PATH", "")
     operator_queue_file_path = os.getenv("OPERATOR_CONSOLE_QUEUE_FILE_PATH", "")
     synthetic_monitoring_enabled = os.getenv("SYNTHETIC_MONITORING_ENABLED", "false").strip().lower() in {
@@ -2250,6 +2289,14 @@ def create_app() -> FastAPI:
         webhook_store = JsonFileWebhookSubscriptionStore(webhook_store_file_path)
     else:
         webhook_store = InMemoryWebhookSubscriptionStore()
+
+    if artifact_store_type == "file":
+        if not artifact_store_dir:
+            raise RuntimeError("ARTIFACT_STORE_DIR is required when ARTIFACT_STORE=file")
+        artifact_writer = FilesystemArtifactWriter(artifact_store_dir)
+    else:
+        artifact_writer = InMemoryArtifactWriter()
+    artifact_manager = ArtifactManager(primary_writer=artifact_writer)
 
     registry = SessionRegistry(ttl_seconds=session_ttl_seconds, metadata_store=metadata_store)
     async_job_queue = InMemoryActionQueue(
@@ -6199,6 +6246,16 @@ def create_app() -> FastAPI:
         except RuntimeError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    def _require_session(session_id: str, tenant_id: str) -> None:
+        try:
+            registry.get_record(session_id, tenant_id=tenant_id)
+        except SessionExpiredError as exc:
+            raise HTTPException(status_code=410, detail=str(exc)) from exc
+        except SessionAccessDeniedError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="session not found") from exc
+
     def _new_api_key_secret() -> str:
         return f"pmk_{uuid4().hex}{uuid4().hex[:8]}"
 
@@ -6262,6 +6319,74 @@ def create_app() -> FastAPI:
         for secret in current_secrets:
             key_id_by_secret.pop(secret, None)
         return APIKeyRevokeResponse(key_id=key_id, revoked=True)
+
+    def _to_artifact_response(record: ArtifactRecord) -> ArtifactRecordResponse:
+        return ArtifactRecordResponse(
+            artifact_id=record.artifact_id,
+            session_id=record.session_id,
+            artifact_type=record.artifact_type.value,
+            path=record.path,
+            checksum_sha256=record.checksum_sha256,
+            size_bytes=record.size_bytes,
+            created_at=record.created_at,
+            metadata=dict(record.metadata),
+        )
+
+    def _ingest_screenshot_artifact(
+        session_id: str,
+        payload: ScreenshotArtifactIngestRequest,
+    ) -> ArtifactRecordResponse:
+        screenshot = _decode_screenshot_payload(payload.screenshot_base64)
+        metadata = dict(payload.metadata)
+        if payload.step_index is not None:
+            metadata["step_index"] = str(payload.step_index)
+        if payload.trace_id is not None and payload.trace_id.strip():
+            metadata["trace_id"] = payload.trace_id.strip()
+        metadata.setdefault("artifact_kind", "frame_capture")
+
+        try:
+            if payload.expected_checksum_sha256 is not None and payload.expected_checksum_sha256.strip():
+                record = artifact_manager.register_uploaded_artifact(
+                    session_id=session_id,
+                    artifact_type=ArtifactType.SCREENSHOT,
+                    content=screenshot,
+                    expected_checksum_sha256=payload.expected_checksum_sha256.strip(),
+                    metadata=metadata,
+                )
+            else:
+                record = artifact_manager.write(
+                    session_id=session_id,
+                    artifact_type=ArtifactType.SCREENSHOT,
+                    content=screenshot,
+                    metadata=metadata,
+                )
+        except ArtifactIntegrityError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        return _to_artifact_response(record)
+
+    def _list_artifacts(session_id: str, artifact_type: str | None = None) -> ArtifactListResponse:
+        filter_type: ArtifactType | None = None
+        if artifact_type is not None and artifact_type.strip():
+            try:
+                filter_type = ArtifactType(artifact_type.strip().lower())
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="invalid artifact_type") from exc
+
+        records = artifact_manager.index.lookup(session_id=session_id, artifact_type=filter_type)
+        records.sort(key=lambda item: item.created_at, reverse=True)
+        items = [_to_artifact_response(record) for record in records]
+        return ArtifactListResponse(items=items, total=len(items))
+
+    def _get_artifact_content(artifact_id: str) -> ArtifactContentResponse:
+        try:
+            record = artifact_manager.get_record(artifact_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="artifact not found") from exc
+
+        content = artifact_manager.read_content(artifact_id)
+        encoded = base64.b64encode(content).decode("ascii")
+        return ArtifactContentResponse(artifact=_to_artifact_response(record), content_base64=encoded)
 
     def _to_ui_entity(item: UIEntityPayload) -> UIEntity:
         return UIEntity(
@@ -6922,6 +7047,78 @@ def create_app() -> FastAPI:
         )
         _emit_lifecycle_event(request, event_type="session.resume", session_id=session_id)
         return payload
+
+    @app.post(
+        f"{API_V1_PREFIX}/sessions/{{session_id}}/artifacts/screenshot",
+        response_model=ArtifactRecordResponse,
+    )
+    def upload_session_screenshot_v1(
+        session_id: str,
+        payload: ScreenshotArtifactIngestRequest,
+        request: Request,
+    ) -> ArtifactRecordResponse:
+        _require_session(session_id, tenant_id=_tenant_id(request))
+        artifact = _ingest_screenshot_artifact(session_id, payload)
+        _append_audit_event(
+            request,
+            action="artifact.screenshot.upload",
+            resource_type="artifact",
+            resource_id=artifact.artifact_id,
+            details={"session_id": session_id},
+        )
+        return artifact
+
+    @app.post(
+        "/sessions/{session_id}/artifacts/screenshot",
+        response_model=ArtifactRecordResponse,
+        deprecated=True,
+    )
+    def upload_session_screenshot_legacy(
+        session_id: str,
+        payload: ScreenshotArtifactIngestRequest,
+        response: Response,
+        request: Request,
+    ) -> ArtifactRecordResponse:
+        _set_deprecation_headers(response)
+        _require_session(session_id, tenant_id=_tenant_id(request))
+        artifact = _ingest_screenshot_artifact(session_id, payload)
+        _append_audit_event(
+            request,
+            action="artifact.screenshot.upload",
+            resource_type="artifact",
+            resource_id=artifact.artifact_id,
+            details={"session_id": session_id},
+        )
+        return artifact
+
+    @app.get(f"{API_V1_PREFIX}/sessions/{{session_id}}/artifacts", response_model=ArtifactListResponse)
+    def list_session_artifacts_v1(
+        session_id: str,
+        request: Request,
+        artifact_type: str | None = Query(default=None),
+    ) -> ArtifactListResponse:
+        _require_session(session_id, tenant_id=_tenant_id(request))
+        return _list_artifacts(session_id=session_id, artifact_type=artifact_type)
+
+    @app.get("/sessions/{session_id}/artifacts", response_model=ArtifactListResponse, deprecated=True)
+    def list_session_artifacts_legacy(
+        session_id: str,
+        response: Response,
+        request: Request,
+        artifact_type: str | None = Query(default=None),
+    ) -> ArtifactListResponse:
+        _set_deprecation_headers(response)
+        _require_session(session_id, tenant_id=_tenant_id(request))
+        return _list_artifacts(session_id=session_id, artifact_type=artifact_type)
+
+    @app.get(f"{API_V1_PREFIX}/artifacts/{{artifact_id}}/content", response_model=ArtifactContentResponse)
+    def get_artifact_content_v1(artifact_id: str) -> ArtifactContentResponse:
+        return _get_artifact_content(artifact_id)
+
+    @app.get("/artifacts/{artifact_id}/content", response_model=ArtifactContentResponse, deprecated=True)
+    def get_artifact_content_legacy(artifact_id: str, response: Response) -> ArtifactContentResponse:
+        _set_deprecation_headers(response)
+        return _get_artifact_content(artifact_id)
 
     @app.post(f"{API_V1_PREFIX}/jobs", response_model=AsyncJobSubmitResponse)
     def submit_async_job_v1(payload: AsyncJobSubmitRequest, request: Request) -> AsyncJobSubmitResponse:

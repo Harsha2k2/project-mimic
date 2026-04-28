@@ -40,7 +40,7 @@ This document describes the concrete work required to move Project Mimic from it
   - [ ] Tag screenshots with session and step metadata
 - [ ] Stream screenshots to vision inference
   - [x] Send live screenshot payloads to the vision/Triton client
-  - [ ] Store screenshot artifacts for debugging and replay
+  - [x] Store screenshot artifacts for debugging and replay
 - [ ] Add screenshot-based operator observability
   - [ ] Expose screenshot artifact links in the operator console
 
