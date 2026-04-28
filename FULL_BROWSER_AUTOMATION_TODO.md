@@ -3,16 +3,16 @@
 This document describes the concrete work required to move Project Mimic from its current session simulation/prototype stage into a fully integrated live browser automation platform.
 
 ## 1. Browser Worker Runtime
-- [ ] Add a browser worker service implementation
-  - [ ] Create a Node.js service for browser worker orchestration
-  - [ ] Install and configure Playwright runtime dependencies
-  - [ ] Build a worker container image with browser binaries and Node runtime
+- [x] Add a browser worker service implementation
+  - [x] Create a Node.js service for browser worker orchestration
+  - [x] Install and configure Playwright runtime dependencies
+  - [x] Build a worker container image with browser binaries and Node runtime
 - [ ] Add browser worker sidecar bridge
   - [ ] Create a Rust/CDP sidecar for low-level event emission
   - [ ] Wire sidecar communication between Node.js worker and Playwright
-- [ ] Add browser worker health and readiness probes
-  - [ ] Expose liveness/readiness endpoints
-  - [ ] Integrate with Kubernetes deployment manifests
+- [x] Add browser worker health and readiness probes
+  - [x] Expose liveness/readiness endpoints
+  - [x] Integrate with Kubernetes deployment manifests
 
 ## 2. Session Allocation and Worker Binding
 - [ ] Implement session-to-worker binding logic

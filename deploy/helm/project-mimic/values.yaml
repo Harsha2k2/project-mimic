@@ -9,6 +9,7 @@ browserWorker:
   image: ghcr.io/harsha2k2/project-mimic-worker:latest
   sidecarImage: ghcr.io/harsha2k2/project-mimic-mimetic:latest
   replicas: 4
+  port: 7000
   engines:
     - chromium
     - firefox

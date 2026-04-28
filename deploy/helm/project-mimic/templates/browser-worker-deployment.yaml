@@ -18,10 +18,26 @@ spec:
       containers:
         - name: worker
           image: {{ .Values.browserWorker.image }}
+          ports:
+            - containerPort: {{ .Values.browserWorker.port }}
           env:
+            - name: PORT
+              value: "{{ .Values.browserWorker.port }}"
             - name: PLAYWRIGHT_BROWSERS
               value: "{{ join \",\" .Values.browserWorker.engines }}"
             - name: PLAYWRIGHT_PRIMARY_BROWSER
               value: "{{ index .Values.browserWorker.engines 0 }}"
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.browserWorker.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: {{ .Values.browserWorker.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
         - name: mimetic-sidecar
           image: {{ .Values.browserWorker.sidecarImage }}

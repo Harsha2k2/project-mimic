@@ -1,0 +1,17 @@
+{
+  "name": "@project-mimic/browser-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Browser worker runtime for Project Mimic",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "node --test tests"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

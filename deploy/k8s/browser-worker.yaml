@@ -17,11 +17,31 @@ spec:
         - name: playwright-runtime
           image: ghcr.io/harsha2k2/project-mimic-worker:latest
           imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 7000
           env:
+            - name: PORT
+              value: "7000"
+            - name: PLAYWRIGHT_BROWSERS
+              value: "chromium,firefox,webkit"
+            - name: PLAYWRIGHT_PRIMARY_BROWSER
+              value: "chromium"
             - name: TRITON_ENDPOINT
               value: http://mimic-triton.project-mimic.svc.cluster.local:8000
             - name: PROXY_GATEWAY
               value: http://mimic-proxy.project-mimic.svc.cluster.local:8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 7000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 7000
+            initialDelaySeconds: 3
+            periodSeconds: 10
         - name: mimetic-sidecar
           image: ghcr.io/harsha2k2/project-mimic-mimetic:latest
           imagePullPolicy: IfNotPresent

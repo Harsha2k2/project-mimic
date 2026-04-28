@@ -84,6 +84,7 @@ This folder contains the end-to-end system design package for Project Mimic Stag
   - `lld/68-frame-ingestion-and-grounding-api.md`
   - `lld/69-screenshot-artifact-storage-and-replay-api.md`
   - `lld/70-operator-console-screenshot-artifact-links.md`
+  - `lld/71-browser-worker-runtime-service.md`
 - Ops and Scale
   - `ops/01-kubernetes-gpu-scaling.md`
   - `ops/02-proxy-fingerprinting-strategy.md`
